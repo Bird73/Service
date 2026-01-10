@@ -13,6 +13,8 @@ public static class AuthErrorCodes
     public const string TokenExpired = "token_expired";
     public const string TokenRevoked = "token_revoked";
     public const string TokenVersionMismatch = "token_version_mismatch";
+    public const string RefreshTokenReuseDetected = "refresh_token_reuse_detected";
+    public const string AccessTokenRevoked = "access_token_revoked";
     public const string UserNotFound = "user_not_found";
     public const string TenantNotFound = "tenant_not_found";
 }
