@@ -1,4 +1,4 @@
-namespace Company.Security.Abstractions;
+namespace Company.Security.Abstractions.Constants;
 
 /// <summary>
 /// 常見錯誤碼

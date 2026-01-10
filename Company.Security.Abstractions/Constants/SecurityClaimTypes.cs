@@ -1,4 +1,4 @@
-namespace Company.Security.Abstractions;
+namespace Company.Security.Abstractions.Constants;
 
 /// <summary>
 /// JWT 中的自訂 claim 名稱常數
