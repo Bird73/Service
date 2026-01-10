@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Repositories;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// 本地帳號 Repository
 /// </summary>
@@ -16,12 +18,4 @@ public interface ILocalAccountRepository
         string usernameOrEmail,
         string passwordHash,
         CancellationToken cancellationToken = default);
-}
-
-public sealed record LocalAccountDto
-{
-    public required Guid TenantId { get; init; }
-    public required Guid OurSubject { get; init; }
-    public required string UsernameOrEmail { get; init; }
-    public required string PasswordHash { get; init; }
 }

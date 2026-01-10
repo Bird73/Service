@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Repositories;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// Tenant Repository
 /// </summary>
@@ -17,12 +19,4 @@ public interface ITenantRepository
     Task<int> IncrementTokenVersionAsync(
         Guid tenantId,
         CancellationToken cancellationToken = default);
-}
-
-public sealed record TenantDto
-{
-    public required Guid TenantId { get; init; }
-    public required string Name { get; init; }
-    public required int TokenVersion { get; init; }
-    public required DateTimeOffset CreatedAt { get; init; }
 }

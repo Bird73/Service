@@ -1,3 +1,5 @@
+using Company.Security.Abstractions.Models;
+
 namespace Company.Security.Abstractions.Repositories;
 
 /// <summary>
@@ -53,14 +55,3 @@ public interface IAuthStateRepository
         CancellationToken cancellationToken = default);
 }
 
-public sealed record AuthStateDto
-{
-    public required string State { get; init; }
-    public required Guid TenantId { get; init; }
-    public required DateTimeOffset CreatedAt { get; init; }
-    public required DateTimeOffset ExpiresAt { get; init; }
-    public DateTimeOffset? UsedAt { get; init; }
-
-    public string? CodeVerifier { get; init; }
-    public string? Nonce { get; init; }
-}

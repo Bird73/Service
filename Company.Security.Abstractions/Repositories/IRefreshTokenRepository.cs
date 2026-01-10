@@ -1,3 +1,5 @@
+using Company.Security.Abstractions.Models;
+
 namespace Company.Security.Abstractions.Repositories;
 
 /// <summary>
@@ -44,20 +46,4 @@ public interface IRefreshTokenRepository
     Task<int> DeleteExpiredAsync(
         DateTimeOffset now,
         CancellationToken cancellationToken = default);
-}
-
-public sealed record RefreshTokenDto
-{
-    public required Guid Id { get; init; }
-    public required Guid TenantId { get; init; }
-    public required Guid OurSubject { get; init; }
-    public required string TokenHash { get; init; }
-    public required DateTimeOffset CreatedAt { get; init; }
-    public required DateTimeOffset ExpiresAt { get; init; }
-    public DateTimeOffset? RevokedAt { get; init; }
-    public Guid? ReplacedByRefreshTokenId { get; init; }
-    public required int IssuedTenantTokenVersion { get; init; }
-    public required int IssuedSubjectTokenVersion { get; init; }
-
-    public bool IsValid(DateTimeOffset now) => RevokedAt is null && ExpiresAt > now;
 }

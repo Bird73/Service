@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Repositories;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// 外部身份 Repository
 /// </summary>
@@ -19,13 +21,4 @@ public interface IExternalIdentityRepository
         string issuer,
         string providerSub,
         CancellationToken cancellationToken = default);
-}
-
-public sealed record ExternalIdentityDto
-{
-    public required Guid TenantId { get; init; }
-    public required Guid OurSubject { get; init; }
-    public required string Provider { get; init; }
-    public required string Issuer { get; init; }
-    public required string ProviderSub { get; init; }
 }

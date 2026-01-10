@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Repositories;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// Subject Repository
 /// </summary>
@@ -25,12 +27,4 @@ public interface ISubjectRepository
         Guid tenantId,
         Guid ourSubject,
         CancellationToken cancellationToken = default);
-}
-
-public sealed record SubjectDto
-{
-    public required Guid TenantId { get; init; }
-    public required Guid OurSubject { get; init; }
-    public required int TokenVersion { get; init; }
-    public required DateTimeOffset CreatedAt { get; init; }
 }
