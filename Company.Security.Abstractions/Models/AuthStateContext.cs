@@ -1,4 +1,4 @@
-namespace Company.Security.Abstractions;
+namespace Company.Security.Abstractions.Models;
 
 /// <summary>
 /// OIDC Callback 時需要的 state 內容（ConsumeState 取得）。

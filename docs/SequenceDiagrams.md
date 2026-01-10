@@ -26,13 +26,17 @@ sequenceDiagram
         AS-->>API: AuthResult.Fail("InvalidCredentials")
         API-->>C: 401 Unauthorized
     else Account found
-        AS->>AS: VerifyPasswordHash(password, account.PasswordHash)
+        note over AS,LA: 密碼雜湊不外洩；由 repository 封裝驗證
+        AS->>LA: VerifyPasswordAsync(tenant_id, username, password)
+        LA->>DB: SELECT LocalAccount + Verify hash
+        DB-->>LA: ok | fail
         alt Password mismatch
+            LA-->>AS: null
             AS-->>API: AuthResult.Fail("InvalidCredentials")
             API-->>C: 401 Unauthorized
         else Password valid
-            note over AS,LA: our_subject 由 LocalAccount（tenant-scoped）查得
-            AS->>TS: GenerateTokensAsync(tenant_id, account.OurSubject)
+            LA-->>AS: our_subject
+            AS->>TS: GenerateTokensAsync(tenant_id, our_subject)
             TS->>DB: INSERT RefreshToken (hash)
             TS-->>AS: TokenPair {access_token, refresh_token, expires_in}
             AS-->>API: AuthResult.Success(TokenPair)
@@ -129,7 +133,7 @@ sequenceDiagram
     else State consumed
         SS-->>API: AuthStateContext {tenant_id, code_verifier, nonce, ...}
         note over API,PS: 交換 code 時需帶入 PKCE code_verifier；並在驗證 id_token 時驗 nonce
-        API->>PS: ExchangeCodeAsync(tenant_id, provider, code, code_verifier)
+        API->>PS: ExchangeCodeAsync(tenant_id, provider, code, ctx)
         PS->>P: POST /token {code, client_id, client_secret, code_verifier(from state context)}
         P-->>PS: {id_token, access_token}
         PS->>PS: Validate id_token (含 nonce), extract (issuer, provider_sub)
@@ -332,7 +336,7 @@ sequenceDiagram
 sequenceDiagram
     participant RS as Client / Resource Server
     participant API as Authentication API
-    participant AZ as IAuthorizationService
+    participant AZ as ISecurityAuthorizationService
     participant DB as Database
 
     RS->>API: POST /api/authz/check<br/>{permission} + Authorization: Bearer(access)

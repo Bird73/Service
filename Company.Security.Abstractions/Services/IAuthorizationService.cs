@@ -3,7 +3,7 @@ namespace Company.Security.Abstractions.Services;
 /// <summary>
 /// 授權檢查服務
 /// </summary>
-public interface IAuthorizationService
+public interface ISecurityAuthorizationService
 {
     /// <summary>
     /// 檢查指定 subject 是否擁有指定權限

@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Services;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// OIDC Provider 服務（取得授權 URL、交換 code、驗證 id_token）
 /// </summary>
@@ -30,7 +32,7 @@ public interface IOidcProviderService
         Guid tenantId,
         string provider,
         string code,
-        string codeVerifier,
+        AuthStateContext ctx,
         string? redirectUri = null,
         CancellationToken cancellationToken = default);
 }

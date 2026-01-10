@@ -1,5 +1,7 @@
 namespace Company.Security.Abstractions.Services;
 
+using Company.Security.Abstractions.Models;
+
 /// <summary>
 /// OIDC 一次性 State 服務
 /// </summary>
