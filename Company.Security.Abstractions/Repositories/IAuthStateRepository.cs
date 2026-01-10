@@ -16,6 +16,15 @@ public interface IAuthStateRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 將 OIDC 需要的 context 綁定到 state（例如 code_verifier、nonce）。
+    /// </summary>
+    Task<bool> TryAttachOidcContextAsync(
+        string state,
+        string codeVerifier,
+        string nonce,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 標記為已使用（原子性）
     /// </summary>
     Task<bool> TryConsumeAsync(
@@ -38,4 +47,7 @@ public sealed record AuthStateDto
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
     public DateTimeOffset? UsedAt { get; init; }
+
+    public string? CodeVerifier { get; init; }
+    public string? Nonce { get; init; }
 }

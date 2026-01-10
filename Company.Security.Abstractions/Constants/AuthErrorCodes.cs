@@ -10,6 +10,8 @@ public static class AuthErrorCodes
     public const string StateExpired = "state_expired";
     public const string ProviderNotEnabled = "provider_not_enabled";
     public const string InvalidToken = "invalid_token";
+    public const string ExpiredToken = "expired_token";
+    public const string RevokedToken = "revoked_token";
     public const string TokenExpired = "token_expired";
     public const string TokenRevoked = "token_revoked";
     public const string TokenVersionMismatch = "token_version_mismatch";

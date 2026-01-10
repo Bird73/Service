@@ -82,7 +82,7 @@ sequenceDiagram
 
     alt State invalid/expired
         SS-->>API: null
-        API-->>C: 400 Bad Request (invalid_state)
+        API-->>B: 302 Redirect to SPA error page (error=invalid_state)
     else State valid
         SS-->>API: tenant_id
         API->>PS: IsTenantProviderEnabledAsync(tenant_id, provider)
@@ -91,10 +91,11 @@ sequenceDiagram
 
         alt Provider not enabled for tenant
             PS-->>API: false
-            API-->>C: 403 Forbidden (provider_not_enabled)
+            API-->>B: 302 Redirect to SPA error page (error=provider_not_enabled)
         else Provider enabled
             PS-->>API: true
-            note over API,PS: 產生 PKCE code_verifier + code_challenge 與 nonce，並將 verifier/nonce 綁定保存到 state
+            note over API,PS: 產生 PKCE code_verifier + code_challenge 與 nonce
+            API->>SS: TryAttachOidcContextAsync(state, code_verifier, nonce)
             API->>PS: GetAuthorizationUrl(provider, state)
             PS-->>API: authorization_url
             API-->>B: 302 Redirect to authorization_url (含 code_challenge, nonce, state)
@@ -124,12 +125,12 @@ sequenceDiagram
 
     alt State already used or not found
         SS-->>API: null
-        API-->>P: 400 Bad Request (invalid_state)
+        API-->>B: 302 Redirect to SPA error page (error=invalid_state)
     else State consumed
-        SS-->>API: tenant_id
+        SS-->>API: AuthStateContext {tenant_id, code_verifier, nonce, ...}
         note over API,PS: 交換 code 時需帶入 PKCE code_verifier；並在驗證 id_token 時驗 nonce
         API->>PS: ExchangeCodeAsync(provider, code)
-        PS->>P: POST /token {code, client_id, client_secret, code_verifier}
+        PS->>P: POST /token {code, client_id, client_secret, code_verifier(from state context)}
         P-->>PS: {id_token, access_token}
         PS->>PS: Validate id_token (含 nonce), extract (issuer, provider_sub)
         PS-->>API: OidcUserInfo {issuer, provider_sub, email?, name?}
@@ -177,14 +178,22 @@ sequenceDiagram
 
     alt Token not found
         TS-->>API: RefreshResult.Fail("invalid_token")
-        API-->>C: 401 Unauthorized
+        API-->>C: 401 Unauthorized (invalid_token)
     else Token found
-        alt Token revoked/expired
-            note over TS,DB: refresh token reuse 偵測：已撤銷的 token 再次被使用，視為可能被竊
-            TS->>DB: REVOKE ALL RefreshTokens for (tenant_id, our_subject)
-            TS->>DB: INCREMENT Subject.token_version (force re-login)
-            TS-->>API: RefreshResult.Fail("refresh_token_reuse_detected")
-            API-->>C: 401 Unauthorized (re-login required)
+        alt Token expired (not revoked)
+            TS-->>API: RefreshResult.Fail("expired_token")
+            API-->>C: 401 Unauthorized (expired_token; re-login required)
+        else Token revoked
+            alt revoked due to rotation (replaced_by != null)
+                note over TS,DB: refresh token reuse 偵測：rotation 後舊 token 再次被使用，視為可能被竊
+                TS->>DB: REVOKE ALL RefreshTokens for (tenant_id, our_subject)
+                TS->>DB: INCREMENT Subject.token_version (force re-login)
+                TS-->>API: RefreshResult.Fail("refresh_token_reuse_detected")
+                API-->>C: 401 Unauthorized (re-login required)
+            else revoked by user logout
+                TS-->>API: RefreshResult.Fail("revoked_token")
+                API-->>C: 401 Unauthorized (revoked_token)
+            end
         else Token valid (not revoked & not expired)
         TS->>DB: SELECT Tenant.token_version, Subject.token_version
         DB-->>TS: tenant_tv, subject_tv
@@ -199,7 +208,6 @@ sequenceDiagram
             TS->>TS: GenerateAccessToken(tenant_id, our_subject, tenant_tv, subject_tv)
             TS-->>API: TokenPair {new access_token, new refresh_token}
             API-->>C: 200 OK {access_token, refresh_token, expires_in}
-        end
         end
     end
 ```
@@ -222,6 +230,8 @@ sequenceDiagram
     DB-->>TS: affected rows
     TS-->>API: RevokeResult.Success
     API-->>C: 200 OK
+
+```
 
 ---
 
@@ -273,7 +283,6 @@ sequenceDiagram
     DB-->>SS: affected rows
     SS-->>API: new token_version
     API-->>B: 200 OK
-```
 ```
 
 ---

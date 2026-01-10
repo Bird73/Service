@@ -20,9 +20,20 @@ public interface IAuthStateService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 消耗 state（標記已使用）並回傳對應的 tenant；若已使用或不存在則回傳 null
+    /// 將 OIDC 需要的 context（PKCE code_verifier、nonce）綁定到 state。
+    ///
+    /// 規則：若 state 不存在/已使用/已過期，應回傳 false。
     /// </summary>
-    Task<Guid?> ConsumeStateAsync(
+    Task<bool> TryAttachOidcContextAsync(
+        string state,
+        string codeVerifier,
+        string nonce,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 消耗 state（一次性）並回傳 OIDC callback 需要的完整 context；若已使用或不存在則回傳 null。
+    /// </summary>
+    Task<AuthStateContext?> ConsumeStateAsync(
         string state,
         CancellationToken cancellationToken = default);
 
