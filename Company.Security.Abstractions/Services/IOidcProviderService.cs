@@ -17,6 +17,7 @@ public interface IOidcProviderService
     /// 取得 OIDC 授權 URL
     /// </summary>
     Task<string> GetAuthorizationUrlAsync(
+        Guid tenantId,
         string provider,
         string state,
         string? redirectUri = null,
@@ -26,6 +27,7 @@ public interface IOidcProviderService
     /// 以 authorization code 交換 token 並驗證，回傳使用者資訊
     /// </summary>
     Task<OidcUserInfo> ExchangeCodeAsync(
+        Guid tenantId,
         string provider,
         string code,
         string codeVerifier,

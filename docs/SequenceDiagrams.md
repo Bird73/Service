@@ -96,7 +96,7 @@ sequenceDiagram
             PS-->>API: true
             note over API,PS: 產生 PKCE code_verifier + code_challenge 與 nonce
             API->>SS: TryAttachOidcContextAsync(state, code_verifier, nonce)
-            API->>PS: GetAuthorizationUrl(provider, state)
+            API->>PS: GetAuthorizationUrlAsync(tenant_id, provider, state)
             PS-->>API: authorization_url
             API-->>B: 302 Redirect to authorization_url (含 code_challenge, nonce, state)
         end
@@ -129,7 +129,7 @@ sequenceDiagram
     else State consumed
         SS-->>API: AuthStateContext {tenant_id, code_verifier, nonce, ...}
         note over API,PS: 交換 code 時需帶入 PKCE code_verifier；並在驗證 id_token 時驗 nonce
-        API->>PS: ExchangeCodeAsync(provider, code, code_verifier)
+        API->>PS: ExchangeCodeAsync(tenant_id, provider, code, code_verifier)
         PS->>P: POST /token {code, client_id, client_secret, code_verifier(from state context)}
         P-->>PS: {id_token, access_token}
         PS->>PS: Validate id_token (含 nonce), extract (issuer, provider_sub)
