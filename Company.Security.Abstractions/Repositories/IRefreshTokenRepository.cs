@@ -22,6 +22,8 @@ public interface IRefreshTokenRepository
     /// 撤銷指定 token（可選設定 replacedBy）
     /// </summary>
     Task<bool> RevokeAsync(
+        Guid tenantId,
+        Guid ourSubject,
         string tokenHash,
         DateTimeOffset revokedAt,
         Guid? replacedByTokenId = null,

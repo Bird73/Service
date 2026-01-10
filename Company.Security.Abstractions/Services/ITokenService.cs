@@ -24,6 +24,8 @@ public interface ITokenService
     /// 撤銷指定的 Refresh Token
     /// </summary>
     Task<RevokeResult> RevokeAsync(
+        Guid tenantId,
+        Guid ourSubject,
         string refreshToken,
         CancellationToken cancellationToken = default);
 

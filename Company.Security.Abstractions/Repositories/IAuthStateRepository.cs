@@ -17,6 +17,8 @@ public interface IAuthStateRepository
 
     /// <summary>
     /// 將 OIDC 需要的 context 綁定到 state（例如 code_verifier、nonce）。
+    ///
+    /// 規則：只允許 attach 一次；若已 attach/已用/已過期/不存在，回傳 false。
     /// </summary>
     Task<bool> TryAttachOidcContextAsync(
         string state,
@@ -28,6 +30,17 @@ public interface IAuthStateRepository
     /// 標記為已使用（原子性）
     /// </summary>
     Task<bool> TryConsumeAsync(
+        string state,
+        DateTimeOffset usedAt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 原子性地「讀出 state + context」並標記 used。
+    ///
+    /// - 不存在/已用/已過期：回傳 null
+    /// - 成功：回傳完整 DTO（含 tenant_id, code_verifier, nonce），並保證 used_at 已寫入
+    /// </summary>
+    Task<AuthStateDto?> TryConsumeAndGetAsync(
         string state,
         DateTimeOffset usedAt,
         CancellationToken cancellationToken = default);

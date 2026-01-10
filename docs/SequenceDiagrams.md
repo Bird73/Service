@@ -129,7 +129,7 @@ sequenceDiagram
     else State consumed
         SS-->>API: AuthStateContext {tenant_id, code_verifier, nonce, ...}
         note over API,PS: 交換 code 時需帶入 PKCE code_verifier；並在驗證 id_token 時驗 nonce
-        API->>PS: ExchangeCodeAsync(provider, code)
+        API->>PS: ExchangeCodeAsync(provider, code, code_verifier)
         PS->>P: POST /token {code, client_id, client_secret, code_verifier(from state context)}
         P-->>PS: {id_token, access_token}
         PS->>PS: Validate id_token (含 nonce), extract (issuer, provider_sub)
@@ -223,10 +223,11 @@ sequenceDiagram
     participant TS as ITokenService
     participant DB as Database
 
-    C->>API: POST /api/auth/token/revoke<br/>{refresh_token}
-    API->>TS: RevokeAsync(refresh_token)
+    C->>API: POST /api/auth/token/revoke<br/>{refresh_token} + Authorization: Bearer(access)
+    note over API: tenant_id / our_subject 必須由 access token claims 取得
+    API->>TS: RevokeAsync(tenant_id, our_subject, refresh_token)
     TS->>TS: Hash(refresh_token)
-    TS->>DB: UPDATE RefreshToken SET revoked_at=now WHERE token_hash=xxx
+    TS->>DB: UPDATE RefreshToken SET revoked_at=now WHERE token_hash=xxx AND tenant_id=? AND our_subject=?
     DB-->>TS: affected rows
     TS-->>API: RevokeResult.Success
     API-->>C: 200 OK

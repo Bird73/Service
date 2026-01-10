@@ -28,6 +28,7 @@ public interface IOidcProviderService
     Task<OidcUserInfo> ExchangeCodeAsync(
         string provider,
         string code,
+        string codeVerifier,
         string? redirectUri = null,
         CancellationToken cancellationToken = default);
 }
