@@ -1,0 +1,381 @@
+namespace Birdsoft.Security.Authentication;
+
+using Birdsoft.Security.Abstractions;
+using Birdsoft.Security.Abstractions.Constants;
+using Birdsoft.Security.Abstractions.Options;
+using Birdsoft.Security.Abstractions.Services;
+using Birdsoft.Security.Authentication.Jwt;
+using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+public sealed class InMemoryTokenService : ITokenService
+{
+    private sealed record RefreshRecord(
+        Guid TenantId,
+        Guid OurSubject,
+        DateTimeOffset ExpiresAt,
+        bool Revoked,
+        string? ReplacedBy);
+
+    private readonly IOptionsMonitor<JwtOptions> _jwtOptions;
+    private readonly IJwtKeyProvider _keys;
+    private readonly ConcurrentDictionary<string, RefreshRecord> _refresh = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(Guid TenantId, string Jti), byte> _revokedJti = new();
+
+    public InMemoryTokenService(IOptionsMonitor<JwtOptions> jwtOptions, IJwtKeyProvider keys)
+    {
+        _jwtOptions = jwtOptions;
+        _keys = keys;
+    }
+
+    public Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var opts = _jwtOptions.CurrentValue;
+        if (string.IsNullOrWhiteSpace(accessToken))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        var parts = accessToken.Split('.');
+        if (parts.Length != 3)
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        var headerJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[0]));
+        var payloadJson = Encoding.UTF8.GetString(Base64Url.Decode(parts[1]));
+
+        if (!TryGetHeaderAlg(headerJson, out var tokenAlg))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        if (!string.Equals(tokenAlg, _keys.Algorithm, StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        if (!VerifySignature(parts[0] + "." + parts[1], parts[2]))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        using var doc = JsonDocument.Parse(payloadJson);
+        var root = doc.RootElement;
+
+        if (!TryGetString(root, "iss", out var iss) || !string.Equals(iss, opts.Issuer, StringComparison.Ordinal))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_issuer"));
+        }
+
+        if (!TryAudienceContains(root, opts.Audience))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_audience"));
+        }
+
+        if (!TryGetLong(root, "exp", out var exp))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var skew = opts.ClockSkewSeconds;
+        if (exp + skew < now)
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("expired_token"));
+        }
+
+        if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_tenant"));
+        }
+
+        if (!TryGetString(root, "sub", out var subRaw) || !Guid.TryParse(subRaw, out var ourSubject))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_subject"));
+        }
+
+        if (!TryGetString(root, SecurityClaimTypes.Jti, out var jti) || string.IsNullOrWhiteSpace(jti))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
+        }
+
+        return Task.FromResult(AccessTokenValidationResult.Success(tenantId, ourSubject, jti));
+    }
+
+    public Task<bool> IsJtiRevokedAsync(Guid tenantId, string jti, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        return Task.FromResult(_revokedJti.ContainsKey((tenantId, jti)));
+    }
+
+    public Task<TokenPair> GenerateTokensAsync(
+        Guid tenantId,
+        Guid ourSubject,
+        IReadOnlyList<string>? roles = null,
+        IReadOnlyList<string>? scopes = null,
+        CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var opts = _jwtOptions.CurrentValue;
+
+        var jti = Guid.NewGuid().ToString("N");
+        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, roles, scopes);
+
+        var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var refreshExpires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, opts.RefreshTokenDays));
+        _refresh[refreshToken] = new RefreshRecord(tenantId, ourSubject, refreshExpires, Revoked: false, ReplacedBy: null);
+
+        return Task.FromResult(new TokenPair
+        {
+            AccessToken = accessToken,
+            RefreshToken = refreshToken,
+            ExpiresIn = Math.Max(1, opts.AccessTokenMinutes) * 60,
+        });
+    }
+
+    public Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        if (!_refresh.TryGetValue(refreshToken, out var rec))
+        {
+            return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
+        }
+
+        if (rec.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            return Task.FromResult(RefreshResult.Fail("expired_refresh_token"));
+        }
+
+        if (rec.Revoked)
+        {
+            return Task.FromResult(RefreshResult.Fail("revoked_refresh_token"));
+        }
+
+        // rotation
+        var newRefresh = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var replaced = rec with { Revoked = true, ReplacedBy = newRefresh };
+        _refresh[refreshToken] = replaced;
+
+        var newRec = new RefreshRecord(rec.TenantId, rec.OurSubject, rec.ExpiresAt, Revoked: false, ReplacedBy: null);
+        _refresh[newRefresh] = newRec;
+
+        return GenerateTokensAsync(rec.TenantId, rec.OurSubject, roles: null, scopes: null, cancellationToken)
+            .ContinueWith(t => RefreshResult.Success(t.Result), cancellationToken);
+    }
+
+    public Task<RevokeResult> RevokeAsync(Guid tenantId, Guid ourSubject, string refreshToken, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        if (!_refresh.TryGetValue(refreshToken, out var rec))
+        {
+            return Task.FromResult(RevokeResult.Fail("refresh_token_not_found"));
+        }
+
+        if (rec.TenantId != tenantId || rec.OurSubject != ourSubject)
+        {
+            return Task.FromResult(RevokeResult.Fail("forbidden"));
+        }
+
+        _refresh[refreshToken] = rec with { Revoked = true };
+        return Task.FromResult(RevokeResult.Success());
+    }
+
+    public Task<int> RevokeAllAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        var count = 0;
+        foreach (var (token, rec) in _refresh)
+        {
+            if (rec.TenantId == tenantId && rec.OurSubject == ourSubject && !rec.Revoked)
+            {
+                _refresh[token] = rec with { Revoked = true };
+                count++;
+            }
+        }
+
+        return Task.FromResult(count);
+    }
+
+
+    private string CreateAccessToken(
+        JwtOptions opts,
+        Guid tenantId,
+        Guid ourSubject,
+        string jti,
+        IReadOnlyList<string>? roles,
+        IReadOnlyList<string>? scopes)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
+
+        var alg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? _keys.Algorithm : opts.SigningAlgorithm;
+        var kid = !string.IsNullOrWhiteSpace(opts.Kid) ? opts.Kid : _keys.Kid;
+
+        var header = new Dictionary<string, object?>
+        {
+            ["typ"] = "JWT",
+            ["alg"] = alg,
+            ["kid"] = kid,
+        };
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["iss"] = opts.Issuer,
+            ["aud"] = opts.Audience,
+            ["exp"] = exp.ToUnixTimeSeconds(),
+            ["iat"] = now.ToUnixTimeSeconds(),
+            ["nbf"] = now.ToUnixTimeSeconds(),
+            [SecurityClaimTypes.Jti] = jti,
+            ["sub"] = ourSubject.ToString(),
+            [SecurityClaimTypes.TenantId] = tenantId.ToString(),
+            [SecurityClaimTypes.OurSubject] = ourSubject.ToString(),
+        };
+
+        if (roles is { Count: > 0 })
+        {
+            payload[SecurityClaimTypes.Roles] = roles;
+        }
+
+        if (scopes is { Count: > 0 })
+        {
+            // Keep current payload format (array). Authorization projection will normalize.
+            payload[SecurityClaimTypes.Scopes] = scopes;
+
+            // Compat: OAuth 'scope' (space-delimited)
+            payload[SecurityClaimTypes.Scope] = string.Join(' ', scopes);
+        }
+
+        var headerJson = JsonSerializer.Serialize(header, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+        var payloadJson = JsonSerializer.Serialize(payload, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+
+        var headerPart = Base64Url.Encode(Encoding.UTF8.GetBytes(headerJson));
+        var payloadPart = Base64Url.Encode(Encoding.UTF8.GetBytes(payloadJson));
+        var signingInput = headerPart + "." + payloadPart;
+
+        var signature = Sign(signingInput);
+        return signingInput + "." + signature;
+    }
+
+    private string Sign(string signingInput)
+    {
+        if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        {
+            var rsa = _keys.GetRsaPrivateKey();
+            if (rsa is null)
+            {
+                throw new InvalidOperationException("RS256 requires an RSA private key.");
+            }
+
+            var sig = rsa.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            return Base64Url.Encode(sig);
+        }
+
+        var key = _keys.GetSymmetricKeyBytes();
+        if (key is null || key.Length == 0)
+        {
+            throw new InvalidOperationException("HMAC signing requires JwtOptions.SigningKey.");
+        }
+
+        return ComputeHmacSha256(signingInput, key);
+    }
+
+    private bool VerifySignature(string signingInput, string signaturePart)
+    {
+        if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        {
+            var rsa = _keys.GetRsaPublicKey();
+            if (rsa is null)
+            {
+                return false;
+            }
+
+            var sigBytes = Base64Url.Decode(signaturePart);
+            return rsa.VerifyData(Encoding.ASCII.GetBytes(signingInput), sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        }
+
+        var key = _keys.GetSymmetricKeyBytes();
+        if (key is null || key.Length == 0)
+        {
+            return false;
+        }
+
+        var expected = ComputeHmacSha256(signingInput, key);
+        return CryptographicOperations.FixedTimeEquals(Base64Url.Decode(signaturePart), Base64Url.Decode(expected));
+    }
+
+    private static bool TryGetHeaderAlg(string headerJson, out string alg)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(headerJson);
+            if (doc.RootElement.TryGetProperty("alg", out var a) && a.ValueKind == JsonValueKind.String)
+            {
+                alg = a.GetString() ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(alg);
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        alg = string.Empty;
+        return false;
+    }
+
+    private static string ComputeHmacSha256(string signingInput, byte[] keyBytes)
+    {
+        var data = Encoding.UTF8.GetBytes(signingInput);
+        using var hmac = new HMACSHA256(keyBytes);
+        var hash = hmac.ComputeHash(data);
+        return Base64Url.Encode(hash);
+    }
+
+    private static bool TryGetString(JsonElement root, string name, out string value)
+    {
+        if (root.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String)
+        {
+            value = prop.GetString() ?? string.Empty;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool TryGetLong(JsonElement root, string name, out long value)
+    {
+        if (root.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out value))
+        {
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private static bool TryAudienceContains(JsonElement root, string expectedAudience)
+    {
+        if (string.IsNullOrWhiteSpace(expectedAudience))
+        {
+            return true;
+        }
+
+        if (!root.TryGetProperty("aud", out var aud))
+        {
+            return false;
+        }
+
+        return aud.ValueKind switch
+        {
+            JsonValueKind.String => string.Equals(aud.GetString(), expectedAudience, StringComparison.Ordinal),
+            JsonValueKind.Array => aud.EnumerateArray().Any(e => e.ValueKind == JsonValueKind.String && string.Equals(e.GetString(), expectedAudience, StringComparison.Ordinal)),
+            _ => false,
+        };
+    }
+}

@@ -1,0 +1,56 @@
+@Security_Authentication_HostAddress = http://localhost:5037
+
+@TenantId = 11111111-1111-1111-1111-111111111111
+
+### Password Login
+POST {{Security_Authentication_HostAddress}}/api/v1/auth/password/login
+X-Tenant-Id: {{TenantId}}
+Content-Type: application/json
+
+{
+	"username": "demo",
+	"password": "demo"
+}
+
+### OIDC Challenge (stub)
+GET {{Security_Authentication_HostAddress}}/api/v1/auth/oidc/stub/challenge
+X-Tenant-Id: {{TenantId}}
+Accept: application/json
+
+###
+
+### OIDC Callback (stub)
+GET {{Security_Authentication_HostAddress}}/api/v1/auth/oidc/stub/callback?code=external-sub-1&state=PLEASE_FILL_FROM_CHALLENGE_REDIRECT
+X-Tenant-Id: {{TenantId}}
+Accept: application/json
+
+###
+
+### Refresh
+POST {{Security_Authentication_HostAddress}}/api/v1/auth/token/refresh
+Content-Type: application/json
+
+{
+	"refreshToken": "PLEASE_FILL"
+}
+
+### Token Revoke (single refresh token)
+POST {{Security_Authentication_HostAddress}}/api/v1/auth/token/revoke
+Authorization: Bearer PLEASE_FILL_ACCESS_TOKEN
+Content-Type: application/json
+
+{
+	"refreshToken": "PLEASE_FILL_REFRESH_TOKEN",
+	"allDevices": false
+}
+
+### Logout (all devices)
+POST {{Security_Authentication_HostAddress}}/api/v1/auth/logout
+Authorization: Bearer PLEASE_FILL_ACCESS_TOKEN
+Content-Type: application/json
+
+{
+	"refreshToken": null,
+	"allDevices": true
+}
+

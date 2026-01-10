@@ -1,4 +1,4 @@
-# Company.Security 微服務規劃（Authentication + JWT + Authorization）
+# Security 微服務規劃（Authentication + JWT + Authorization）
 
 ## 1. 目標與設計原則
 
@@ -12,7 +12,7 @@
 
 設計原則：
 
-- Clean Architecture：抽象與共用模型放在 `Company.Security.Abstractions`，核心授權邏輯放在 `Company.Security.Authorization`，WebAPI host 與整合放在 `Company.Security.Authentication`。
+- Clean Architecture：抽象與共用模型放在 `Security.Abstractions`，核心授權邏輯放在 `Security.Authorization`，WebAPI host 與整合放在 `Security.Authentication`。
 - 不存在 GlobalUsers：所有帳號、外部身份、權限均必須 tenant-scoped。
 - OIDC/OAuth 必須做 mapping：`ExternalIdentity(tenant_id, provider, issuer, provider_sub) -> (tenant_id, our_subject)`。
 - 不提供「外部帳號綁定/合併」：同一 tenant 內不允許多個外部 provider 綁定同一 `our_subject`。
@@ -21,12 +21,12 @@
 
 ## 2. Solution / 專案結構
 
-- `Company.Security.sln`
-  - `Company.Security.Abstractions`（class lib, net10.0）
+- `Security.sln`
+  - `Security.Abstractions`（class lib, net10.0）
     - 型別：`TenantId`、`OurSubject`、Claim 常數、DTO/介面
-  - `Company.Security.Authorization`（class lib, net10.0）
+  - `Security.Authorization`（class lib, net10.0）
     - 角色/權限模型、授權判斷服務（permission/role check）
-  - `Company.Security.Authentication`（ASP.NET Core WebAPI, net10.0）
+  - `Security.Authentication`（ASP.NET Core WebAPI, net10.0）
     - 帳密登入、OIDC/OAuth 入口與 callback、JWT/Refresh 發行、撤銷與 token-version
 
 文件：`Security\\docs`
@@ -80,10 +80,10 @@
 
 建議流程：
 
-1. Client 呼叫 `POST /api/tenants/{tenantId}/auth/state` 取得 `state`
-2. Client 導向 `GET /api/auth/oidc/{provider}/start?state=...`
-3. Provider 驗證完成回呼 `GET /api/auth/oidc/{provider}/callback?state=...&code=...`
-4. 系統以 state 查回 tenantId（並標記 state 已使用/作廢）
+1. Client/Browser 呼叫 `GET /api/v1/auth/oidc/{provider}/challenge`（Header 帶 `X-Tenant-Id`）
+2. API 建立一次性 state（5 分鐘），綁定 PKCE/nonce，並 302 Redirect 到 provider
+3. Provider 驗證完成回呼 `GET /api/v1/auth/oidc/{provider}/callback?state=...&code=...`
+4. API Consume state（一次性）後完成 mapping 並簽發 tokens
 
 state 儲存要求：
 

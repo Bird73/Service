@@ -1,4 +1,4 @@
-# Company.Security 循序圖
+# Security 循序圖
 
 > 以 Mermaid 格式繪製主要驗證/授權流程。
 
@@ -15,7 +15,8 @@ sequenceDiagram
     participant TS as ITokenService
     participant DB as Database
 
-    C->>API: POST /api/auth/password/login<br/>{tenant_id, username, password}
+    C->>API: POST /api/v1/auth/password/login<br/>{username, password}
+    note over C,API: tenant_id 由 Header (X-Tenant-Id) 或 JWT claim 解析
     API->>AS: AuthenticateByPasswordAsync(tenant_id, username, password)
     AS->>LA: FindByUsernameAsync(tenant_id, username)
     LA->>DB: SELECT LocalAccount
@@ -58,7 +59,7 @@ sequenceDiagram
     participant SS as IAuthStateService
     participant DB as Database
 
-    C->>API: POST /api/tenants/{tenantId}/auth/state
+    C->>API: GET /api/v1/auth/oidc/{provider}/challenge
     API->>SS: CreateStateAsync(tenant_id)
     SS->>SS: Generate random state (>=128-bit)
     note over SS: 此步僅建立 tenant-aware state；PKCE/nonce 可在 start 時產生並綁定到 state
@@ -78,8 +79,8 @@ sequenceDiagram
     participant PS as IOidcProviderService
     participant DB as Database
 
-    SPA->>B: Navigate to /api/auth/oidc/{provider}/start?state=xxx
-    B->>API: GET /api/auth/oidc/{provider}/start?state=xxx
+    SPA->>B: Navigate to /api/v1/auth/oidc/{provider}/challenge
+    B->>API: GET /api/v1/auth/oidc/{provider}/challenge
     API->>SS: ValidateAndGetTenantAsync(state)
     SS->>DB: SELECT AuthState WHERE state=xxx AND used_at IS NULL AND expires_at > now
     DB-->>SS: AuthState | null
@@ -303,7 +304,8 @@ sequenceDiagram
     participant TS as ITenantService
     participant DB as Database
 
-    Admin->>API: POST /api/tenants/{tenantId}/token-version/bump
+    Admin->>API: POST /api/v1/auth/token-version/bump
+    note over Admin,API: tenant_id 由 Header (X-Tenant-Id) 或 JWT claim 解析
     API->>TS: BumpTenantTokenVersionAsync(tenant_id)
     TS->>DB: UPDATE Tenants SET token_version = token_version + 1 WHERE tenant_id=xxx
     DB-->>TS: affected rows
@@ -320,7 +322,8 @@ sequenceDiagram
     participant SS as ISubjectService
     participant DB as Database
 
-    Admin->>API: POST /api/tenants/{tenantId}/subjects/{ourSubject}/token-version/bump
+    Admin->>API: POST /api/v1/auth/subjects/{ourSubject}/token-version/bump
+    note over Admin,API: tenant_id 由 Header (X-Tenant-Id) 或 JWT claim 解析
     API->>SS: BumpSubjectTokenVersionAsync(tenant_id, our_subject)
     SS->>DB: UPDATE Subjects SET token_version = token_version + 1 WHERE (tenant_id, our_subject)
     DB-->>SS: affected rows

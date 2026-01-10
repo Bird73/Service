@@ -1,4 +1,4 @@
-# Company.Security 資料模型規劃（草案）
+# Security 資料模型規劃（草案）
 
 > 目標：以資料庫約束保證 tenant 隔離與 identity mapping 規則。
 
