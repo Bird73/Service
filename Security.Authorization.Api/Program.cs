@@ -1,12 +1,26 @@
 using Birdsoft.Security.Abstractions.Contracts.Common;
 using Birdsoft.Security.Abstractions.Contracts.Authz;
 using Birdsoft.Security.Abstractions.Constants;
+using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authorization.Evaluation;
+using Birdsoft.Security.Authorization.Api.Auth;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
+
+builder.Services.AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.SectionName));
+
+builder.Services.AddSingleton<IJwtKeyProvider, DefaultJwtKeyProvider>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer();
+builder.Services.AddAuthorization();
+builder.Services.AddSingleton<IPostConfigureOptions<JwtBearerOptions>, BirdsoftJwtBearerPostConfigureOptions>();
 
 // Default (in-memory) authorization data store; replace with DB-backed implementation via DI.
 builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
@@ -21,6 +35,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
 
 var api = app.MapGroup("/api/v1");
 var authz = api.MapGroup("/authz");
