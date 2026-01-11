@@ -228,7 +228,7 @@ sequenceDiagram
     participant TS as ITokenService
     participant DB as Database
 
-    C->>API: POST /api/auth/token/revoke<br/>{refresh_token} + Authorization: Bearer(access)
+    C->>API: POST /api/v1/auth/token/revoke<br/>{refreshToken} + Authorization: Bearer(access)
     note over API: tenant_id / our_subject 必須由 access token claims 取得
     API->>TS: RevokeAsync(tenant_id, our_subject, refresh_token)
     TS->>TS: Hash(refresh_token)
@@ -241,7 +241,9 @@ sequenceDiagram
 
 ---
 
-## 4.1 Logout（單裝置登出，建議同時撤銷 Access Token）
+## 4.1 Logout（Legacy alias）
+
+> `/api/v1/auth/logout` 為 legacy alias；建議改用 `/api/v1/auth/token/revoke`。
 
 > 若要「Access Token 在有效期內仍可立即失效」，需導入 denylist（以 jti 為鍵）並在每次 API 驗證 JWT 時查核。
 
@@ -253,7 +255,7 @@ sequenceDiagram
     participant DL as AccessTokenDenylist
     participant DB as Database
 
-    B->>API: POST /api/auth/logout<br/>{refresh_token} + Authorization: Bearer(access)
+    B->>API: POST /api/v1/auth/logout<br/>{refreshToken} + Authorization: Bearer(access)
     API->>TS: RevokeAsync(refresh_token)
     TS->>DB: UPDATE RefreshToken SET revoked_at=now WHERE token_hash=xxx
     DB-->>TS: affected rows
@@ -268,7 +270,7 @@ sequenceDiagram
 
 ---
 
-## 4.2 Logout All Devices（全裝置登出）
+## 4.2 Revoke All Devices（全裝置登出）
 
 ```mermaid
 sequenceDiagram
@@ -278,7 +280,7 @@ sequenceDiagram
     participant SS as ISubjectService
     participant DB as Database
 
-    B->>API: POST /api/auth/logout-all + Authorization: Bearer(access)
+    B->>API: POST /api/v1/auth/token/revoke<br/>{allDevices:true} + Authorization: Bearer(access)
     note over API: tenant_id / our_subject 由 JWT claims 取得
     API->>TS: RevokeAllAsync(tenant_id, our_subject)
     TS->>DB: UPDATE RefreshTokens SET revoked_at=now WHERE (tenant_id, our_subject)

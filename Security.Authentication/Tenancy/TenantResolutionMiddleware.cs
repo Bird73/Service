@@ -16,6 +16,12 @@ public sealed class TenantResolutionMiddleware : IMiddleware
 
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
     {
+        if (IsOidcCallback(context.Request.Path))
+        {
+            await next(context);
+            return;
+        }
+
         var input = new TenantResolveInput(
             Host: context.Request.Host.HasValue ? context.Request.Host.Value : null,
             Path: context.Request.Path.HasValue ? context.Request.Path.Value : null,
@@ -32,5 +38,35 @@ public sealed class TenantResolutionMiddleware : IMiddleware
         }
 
         await next(context);
+    }
+
+    private static bool IsOidcCallback(PathString path)
+    {
+        if (!path.HasValue)
+        {
+            return false;
+        }
+
+        var p = path.Value ?? string.Empty;
+        if (p.Length == 0)
+        {
+            return false;
+        }
+
+        // /api/v1/auth/oidc/{provider}/callback
+        if (p.StartsWith("/api/v1/auth/oidc/", StringComparison.OrdinalIgnoreCase)
+            && p.EndsWith("/callback", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // legacy: /auth/oidc/{provider}/callback
+        if (p.StartsWith("/auth/oidc/", StringComparison.OrdinalIgnoreCase)
+            && p.EndsWith("/callback", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 }

@@ -38,6 +38,9 @@
 ### POST /api/v1/auth/token/revoke
 - Body：`{ refreshToken, allDevices }`
 
+### POST /api/v1/auth/logout
+- Legacy alias of `/api/v1/auth/token/revoke`（避免語意重疊，建議新呼叫方一律使用 `/token/revoke`）
+
 ## 5. Force re-login（版本號）
 
 ### POST /api/v1/auth/token-version/bump
@@ -46,7 +49,8 @@
 ## 6. Authorization
 
 ### POST /api/v1/authz/check
-- Body：`{ tenantId, ourSubject, resource, action, context }`
+- Tenant 來源：JWT claim `tenant_id`（若有）優先，其次 Header `X-Tenant-Id`
+- Body：`{ ourSubject, resource, action, context }`
 - 回傳：`{ allowed: true/false, reason }`
 
 ## 7. Health

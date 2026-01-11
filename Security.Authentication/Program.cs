@@ -7,11 +7,14 @@ using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Authentication;
+using Birdsoft.Security.Authentication.Auth;
 using Birdsoft.Security.Authentication.Jwt;
 using Birdsoft.Security.Authentication.Persistence;
 using Birdsoft.Security.Authentication.Tenancy;
 using Birdsoft.Security.Data.EfCore;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,6 +32,11 @@ builder.Services.AddOptions<PasswordLoginOptions>()
     .Bind(builder.Configuration.GetSection(PasswordLoginOptions.SectionName));
 
 builder.Services.AddSingleton<IJwtKeyProvider, DefaultJwtKeyProvider>();
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer();
+builder.Services.AddAuthorization();
+builder.Services.AddSingleton<IPostConfigureOptions<JwtBearerOptions>, BirdsoftJwtBearerPostConfigureOptions>();
 
 builder.Services.AddSingleton<ITenantResolver, HeaderOrClaimTenantResolver>();
 builder.Services.AddScoped<TenantContextAccessor>();
@@ -53,9 +61,18 @@ else
     builder.Services.AddSingleton<ITokenService, InMemoryTokenService>();
 }
 
+// OIDC Provider sources/services
+if (useEf)
+{
+    // Provided by AddSecurityEfCoreDataAccess(): IOidcProviderRegistry / IOidcProviderService
+}
+else
+{
+    builder.Services.AddSingleton<IOidcProviderRegistry, InMemoryOidcProviderRegistry>();
+    builder.Services.AddSingleton<IOidcProviderService, InMemoryOidcProviderService>();
+}
+
 // In-memory skeleton services (可替換為實際實作)
-builder.Services.AddSingleton<IOidcProviderRegistry, InMemoryOidcProviderRegistry>();
-builder.Services.AddSingleton<IOidcProviderService, InMemoryOidcProviderService>();
 builder.Services.AddSingleton<IUserProvisioner, InMemoryUserProvisioner>();
 builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
 builder.Services.AddSingleton<IPasswordAuthenticator, InMemoryPasswordAuthenticator>();
@@ -75,6 +92,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseMiddleware<TenantResolutionMiddleware>();
 
 var api = app.MapGroup("/api/v1");
@@ -145,54 +164,6 @@ static async Task<IResult> TokenRefresh(RefreshRequest request, ITokenService to
     return result.Succeeded && result.Tokens is not null
         ? Results.Json(ApiResponse<TokenPair>.Ok(result.Tokens))
         : Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "invalid_refresh_token"), statusCode: StatusCodes.Status401Unauthorized);
-}
-
-static async Task<IResult> Logout(HttpContext http, LogoutRequest request, ITokenService tokens, CancellationToken ct)
-{
-    var bearer = TryGetBearerToken(http);
-    if (string.IsNullOrWhiteSpace(bearer))
-    {
-        return Results.Json(ApiResponse<object>.Fail("missing_bearer_token"), statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var validation = await tokens.ValidateAccessTokenAsync(bearer, ct);
-    if (!validation.Succeeded)
-    {
-        return Results.Json(ApiResponse<object>.Fail(validation.ErrorCode ?? "invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    if (validation.TenantId is null || validation.OurSubject is null)
-    {
-        return Results.Json(ApiResponse<object>.Fail("invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var tenantId = validation.TenantId.Value;
-    var ourSubject = validation.OurSubject.Value;
-
-    var revoked = 0;
-    if (request.AllDevices)
-    {
-        revoked = await tokens.RevokeAllAsync(tenantId, ourSubject, ct);
-        return Results.Json(ApiResponse<LogoutResponse>.Ok(new LogoutResponse(revoked)));
-    }
-
-    if (string.IsNullOrWhiteSpace(request.RefreshToken))
-    {
-        return Results.Json(
-            ApiResponse<object>.Fail("invalid_request", "refreshToken is required unless allDevices=true", SingleField("refreshToken", "required")),
-            statusCode: StatusCodes.Status400BadRequest);
-    }
-
-    var result = await tokens.RevokeAsync(tenantId, ourSubject, request.RefreshToken, ct);
-    if (!result.Succeeded)
-    {
-        var status = string.Equals(result.ErrorCode, "forbidden", StringComparison.Ordinal)
-            ? StatusCodes.Status403Forbidden
-            : StatusCodes.Status400BadRequest;
-        return Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "revoke_failed"), statusCode: status);
-    }
-
-    return Results.Json(ApiResponse<LogoutResponse>.Ok(new LogoutResponse(1)));
 }
 
 static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, CancellationToken ct)
@@ -285,8 +256,6 @@ static async Task<IResult> OidcCallback(
     ITokenService tokens,
     CancellationToken ct)
 {
-    _ = http.GetTenantContext();
-
     if (!string.IsNullOrWhiteSpace(error))
     {
         return Results.Json(ApiResponse<object>.Fail("oidc_error", error), statusCode: StatusCodes.Status400BadRequest);
@@ -347,7 +316,8 @@ auth.MapGet("/oidc/{provider}/callback", OidcCallback);
 
 auth.MapPost("/token/refresh", TokenRefresh);
 
-auth.MapPost("/logout", Logout);
+// Legacy alias: prefer POST /api/v1/auth/token/revoke
+auth.MapPost("/logout", TokenRevoke);
 
 auth.MapPost("/token/revoke", TokenRevoke);
 
@@ -355,7 +325,7 @@ auth.MapPost("/token/revoke", TokenRevoke);
 var legacyAuth = app.MapGroup("/auth");
 legacyAuth.MapPost("/login", PasswordLogin);
 legacyAuth.MapPost("/refresh", TokenRefresh);
-legacyAuth.MapPost("/logout", Logout);
+legacyAuth.MapPost("/logout", TokenRevoke);
 legacyAuth.MapPost("/token/revoke", TokenRevoke);
 legacyAuth.MapGet("/oidc/{provider}/challenge", OidcChallenge);
 legacyAuth.MapGet("/oidc/{provider}/callback", OidcCallback);

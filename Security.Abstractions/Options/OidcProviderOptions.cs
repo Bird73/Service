@@ -27,7 +27,7 @@ public sealed class OidcProviderOptions
     /// <summary>
     /// Callback path（例如 /auth/oidc/google/callback）
     /// </summary>
-    public string CallbackPath { get; init; } = "/auth/oidc/{provider}/callback";
+    public string CallbackPath { get; init; } = "/api/v1/auth/oidc/{provider}/callback";
 
     /// <summary>
     /// OIDC scopes（例如 openid, profile, email）。

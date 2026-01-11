@@ -1,5 +1,6 @@
 using Birdsoft.Security.Abstractions.Contracts.Common;
 using Birdsoft.Security.Abstractions.Contracts.Authz;
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authorization.Evaluation;
 
@@ -24,9 +25,28 @@ app.UseHttpsRedirection();
 var api = app.MapGroup("/api/v1");
 var authz = api.MapGroup("/authz");
 
-authz.MapPost("/check", async (AuthzCheckRequest request, IAuthorizationEvaluator evaluator, CancellationToken ct) =>
+authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAuthorizationEvaluator evaluator, CancellationToken ct) =>
 {
-    if (request.TenantId == Guid.Empty || request.OurSubject == Guid.Empty)
+    static Guid? ResolveTenantId(HttpContext http)
+    {
+        var claim = http.User?.FindFirst(SecurityClaimTypes.TenantId)?.Value;
+        if (!string.IsNullOrWhiteSpace(claim) && Guid.TryParse(claim, out var fromClaim))
+        {
+            return fromClaim;
+        }
+
+        if (http.Request.Headers.TryGetValue("X-Tenant-Id", out var header)
+            && Guid.TryParse(header.ToString(), out var fromHeader))
+        {
+            return fromHeader;
+        }
+
+        return null;
+    }
+
+    var tenantId = ResolveTenantId(http);
+
+    if (tenantId == null || request.OurSubject == Guid.Empty)
     {
         return Results.Json(ApiResponse<object>.Fail("invalid_request"), statusCode: StatusCodes.Status400BadRequest);
     }
@@ -37,7 +57,7 @@ authz.MapPost("/check", async (AuthzCheckRequest request, IAuthorizationEvaluato
     }
 
     var decision = await evaluator.EvaluateAsync(
-        new AuthorizationRequest(request.TenantId, request.OurSubject, request.Resource, request.Action, request.Context),
+        new AuthorizationRequest(tenantId ?? throw new InvalidOperationException(), request.OurSubject, request.Resource, request.Action, request.Context),
         ct);
 
     return Results.Json(ApiResponse<AuthzCheckResponse>.Ok(new AuthzCheckResponse(decision.Allowed, decision.Reason)));

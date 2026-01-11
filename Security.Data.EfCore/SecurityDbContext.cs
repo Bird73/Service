@@ -17,6 +17,7 @@ public sealed class SecurityDbContext : DbContext
     public DbSet<ExternalIdentityEntity> ExternalIdentities => Set<ExternalIdentityEntity>();
     public DbSet<LocalAccountEntity> LocalAccounts => Set<LocalAccountEntity>();
     public DbSet<AccessTokenDenylistEntity> AccessTokenDenylist => Set<AccessTokenDenylistEntity>();
+    public DbSet<OidcProviderConfigEntity> OidcProviders => Set<OidcProviderConfigEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -49,6 +50,11 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.TokenHash).HasMaxLength(128);
             b.HasIndex(x => x.TokenHash).IsUnique();
             b.HasIndex(x => new { x.TenantId, x.OurSubject });
+            b.HasIndex(x => x.ExpiresAt);
+            b.HasIndex(x => x.RevokedAt);
+
+            // Common query pattern: list/cleanup by tenant+subject and validity window.
+            b.HasIndex(x => new { x.TenantId, x.OurSubject, x.RevokedAt, x.ExpiresAt });
         });
 
         modelBuilder.Entity<ExternalIdentityEntity>(b =>
@@ -59,6 +65,9 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.Issuer).HasMaxLength(512);
             b.Property(x => x.ProviderSub).HasMaxLength(256);
             b.HasIndex(x => new { x.TenantId, x.Provider, x.Issuer, x.ProviderSub }).IsUnique();
+
+            // Ensure one subject isn't bound to multiple external identities within a tenant.
+            b.HasIndex(x => new { x.TenantId, x.OurSubject }).IsUnique();
         });
 
         modelBuilder.Entity<LocalAccountEntity>(b =>
@@ -78,6 +87,20 @@ public sealed class SecurityDbContext : DbContext
             b.HasKey(x => new { x.TenantId, x.Jti });
             b.Property(x => x.Jti).HasMaxLength(64);
             b.HasIndex(x => x.ExpiresAt);
+        });
+
+        modelBuilder.Entity<OidcProviderConfigEntity>(b =>
+        {
+            b.ToTable("oidc_providers");
+            b.HasKey(x => new { x.TenantId, x.Provider });
+            b.Property(x => x.Provider).HasMaxLength(64);
+            b.Property(x => x.Authority).HasMaxLength(512);
+            b.Property(x => x.Issuer).HasMaxLength(512);
+            b.Property(x => x.ClientId).HasMaxLength(256);
+            b.Property(x => x.ClientSecret).HasMaxLength(512);
+            b.Property(x => x.CallbackPath).HasMaxLength(256);
+            b.Property(x => x.ScopesJson).HasMaxLength(2048);
+            b.HasIndex(x => x.Enabled);
         });
 
         base.OnModelCreating(modelBuilder);

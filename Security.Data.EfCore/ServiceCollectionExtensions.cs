@@ -1,7 +1,10 @@
 namespace Birdsoft.Security.Data.EfCore;
 
 using Birdsoft.Security.Abstractions.Repositories;
+using Birdsoft.Security.Abstractions.Services;
+using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Data.EfCore.Repositories;
+using Birdsoft.Security.Data.EfCore.Services;
 using Birdsoft.Security.Data.EfCore.Stores;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -22,6 +25,10 @@ public static class ServiceCollectionExtensions
 
         // Not ideal for large scale (Redis recommended), but keeps interface clean and provider-agnostic.
         services.AddScoped<IAccessTokenDenylistStore, EfAccessTokenDenylistStore>();
+
+        // Per-tenant OIDC provider persistence.
+        services.AddScoped<IOidcProviderRegistry, EfOidcProviderRegistry>();
+        services.AddScoped<IOidcProviderService, EfOidcProviderService>();
 
         return services;
     }
