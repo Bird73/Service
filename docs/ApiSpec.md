@@ -28,6 +28,7 @@
 ### GET /api/v1/auth/oidc/{provider}/callback?state=...&code=...
 - 目的：處理 provider callback，完成 ExternalIdentity mapping，發行 tokens
 - 需求：該 `tenant_id` 必須啟用此 `provider`；若 callback 時 provider 被停用，應拒絕並要求改用其他登入方式
+- 錯誤：若 provider 未啟用，回 `403` + `ApiResponse.Fail("provider_not_enabled")`
 
 ## 4. Token refresh / revoke
 

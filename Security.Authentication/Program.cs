@@ -272,12 +272,33 @@ static async Task<IResult> OidcCallback(
         return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var userInfo = await oidc.ExchangeCodeAsync(
-        ctx.TenantId,
-        provider,
-        code,
-        ctx,
-        cancellationToken: ct);
+    try
+    {
+        var enabled = await oidc.IsTenantProviderEnabledAsync(ctx.TenantId, provider, ct);
+        if (!enabled)
+        {
+            return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
+        }
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    OidcUserInfo userInfo;
+    try
+    {
+        userInfo = await oidc.ExchangeCodeAsync(
+            ctx.TenantId,
+            provider,
+            code,
+            ctx,
+            cancellationToken: ct);
+    }
+    catch (InvalidOperationException)
+    {
+        return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
+    }
 
     var key = new Birdsoft.Security.Abstractions.Identity.ExternalIdentityKey(
         ctx.TenantId,
