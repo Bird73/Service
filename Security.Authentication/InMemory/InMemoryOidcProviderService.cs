@@ -26,7 +26,7 @@ public sealed class InMemoryOidcProviderService : IOidcProviderService
         _ = cancellationToken;
 
         // 這裡僅回傳可用於本機測試的假 URL。
-        var url = $"/auth/oidc/{Uri.EscapeDataString(provider)}/callback?code=stub-code&state={Uri.EscapeDataString(state)}&nonce={Uri.EscapeDataString(nonce)}";
+        var url = $"/api/v1/auth/oidc/{Uri.EscapeDataString(provider)}/callback?code=stub-code&state={Uri.EscapeDataString(state)}&nonce={Uri.EscapeDataString(nonce)}";
         return Task.FromResult(url);
     }
 

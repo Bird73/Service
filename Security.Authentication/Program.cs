@@ -2,12 +2,16 @@ using Birdsoft.Security.Abstractions;
 using Birdsoft.Security.Abstractions.Contracts.Auth;
 using Birdsoft.Security.Abstractions.Contracts.Common;
 using Birdsoft.Security.Abstractions.Options;
+using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Authentication;
 using Birdsoft.Security.Authentication.Jwt;
+using Birdsoft.Security.Authentication.Persistence;
 using Birdsoft.Security.Authentication.Tenancy;
+using Birdsoft.Security.Data.EfCore;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,17 +34,40 @@ builder.Services.AddSingleton<ITenantResolver, HeaderOrClaimTenantResolver>();
 builder.Services.AddScoped<TenantContextAccessor>();
 builder.Services.AddTransient<TenantResolutionMiddleware>();
 
+var dbConn = builder.Configuration.GetConnectionString("SecurityDb");
+var useEf = !string.IsNullOrWhiteSpace(dbConn);
+
+if (useEf)
+{
+    builder.Services.AddDbContext<SecurityDbContext>(o => o.UseSqlite(dbConn));
+    builder.Services.AddSecurityEfCoreDataAccess();
+
+    builder.Services.AddScoped<IAuthStateService, RepositoryAuthStateService>();
+    builder.Services.AddScoped<IExternalIdentityStore, ExternalIdentityStoreFromRepository>();
+    builder.Services.AddScoped<ITokenService, RepositoryTokenService>();
+}
+else
+{
+    builder.Services.AddSingleton<IAuthStateService, InMemoryAuthStateService>();
+    builder.Services.AddSingleton<IExternalIdentityStore, InMemoryExternalIdentityStore>();
+    builder.Services.AddSingleton<ITokenService, InMemoryTokenService>();
+}
+
 // In-memory skeleton services (可替換為實際實作)
-builder.Services.AddSingleton<IAuthStateService, InMemoryAuthStateService>();
 builder.Services.AddSingleton<IOidcProviderRegistry, InMemoryOidcProviderRegistry>();
 builder.Services.AddSingleton<IOidcProviderService, InMemoryOidcProviderService>();
-builder.Services.AddSingleton<IExternalIdentityStore, InMemoryExternalIdentityStore>();
 builder.Services.AddSingleton<IUserProvisioner, InMemoryUserProvisioner>();
 builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
 builder.Services.AddSingleton<IPasswordAuthenticator, InMemoryPasswordAuthenticator>();
-builder.Services.AddSingleton<ITokenService, InMemoryTokenService>();
 
 var app = builder.Build();
+
+if (useEf && app.Environment.IsDevelopment())
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<SecurityDbContext>();
+    _ = db.Database.EnsureCreated();
+}
 
 if (app.Environment.IsDevelopment())
 {

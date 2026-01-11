@@ -7,7 +7,7 @@ namespace Birdsoft.Security.Abstractions.Repositories;
 /// </summary>
 public interface IRefreshTokenRepository
 {
-    Task CreateAsync(
+    Task<RefreshTokenDto> CreateAsync(
         Guid tenantId,
         Guid ourSubject,
         string tokenHash,

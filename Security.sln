@@ -15,6 +15,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Authorization.Test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Authorization.Api", "Security.Authorization.Api\Security.Authorization.Api.csproj", "{8D56B29E-8EAD-4D6E-87A4-1D03D7C81B56}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Data.EfCore", "Security.Data.EfCore\Security.Data.EfCore.csproj", "{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -97,6 +99,18 @@ Global
 		{8D56B29E-8EAD-4D6E-87A4-1D03D7C81B56}.Release|x64.Build.0 = Release|Any CPU
 		{8D56B29E-8EAD-4D6E-87A4-1D03D7C81B56}.Release|x86.ActiveCfg = Release|Any CPU
 		{8D56B29E-8EAD-4D6E-87A4-1D03D7C81B56}.Release|x86.Build.0 = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|x64.Build.0 = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Debug|x86.Build.0 = Debug|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|x64.ActiveCfg = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|x64.Build.0 = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|x86.ActiveCfg = Release|Any CPU
+		{C11B8D7E-3F1D-4A24-9539-9E0379B4E83B}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
