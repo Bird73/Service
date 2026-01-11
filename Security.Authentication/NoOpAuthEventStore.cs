@@ -11,4 +11,11 @@ public sealed class NoOpAuthEventStore : IAuthEventStore
         _ = cancellationToken;
         return Task.CompletedTask;
     }
+
+    public Task<IReadOnlyList<AuthEvent>> QueryAsync(AuthEventQuery query, CancellationToken cancellationToken = default)
+    {
+        _ = query;
+        _ = cancellationToken;
+        return Task.FromResult<IReadOnlyList<AuthEvent>>([]);
+    }
 }

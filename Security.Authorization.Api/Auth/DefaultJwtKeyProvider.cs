@@ -2,6 +2,7 @@ namespace Birdsoft.Security.Authorization.Api.Auth;
 
 using Birdsoft.Security.Abstractions.Options;
 using Microsoft.Extensions.Options;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -16,10 +17,18 @@ public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
     private readonly IOptionsMonitor<JwtOptions> _options;
     private readonly object _gate = new();
     private KeyState? _state;
+    private readonly IDisposable _onChange;
 
     public DefaultJwtKeyProvider(IOptionsMonitor<JwtOptions> options)
     {
         _options = options;
+        _onChange = _options.OnChange(_ =>
+        {
+            lock (_gate)
+            {
+                _state = null;
+            }
+        });
     }
 
     public string Algorithm => Ensure().Algorithm;
@@ -46,12 +55,37 @@ public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
             }
 
             var opts = _options.CurrentValue;
-            var alg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? "RS256" : opts.SigningAlgorithm.Trim();
 
-            if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+            if (opts.KeyRing?.Keys is { Length: > 0 })
             {
-                // For validation we only need the public key. If a PEM/base64 private key is supplied,
-                // we can derive its public part; otherwise we generate an ephemeral key (dev-only convenience).
+                var ring = opts.KeyRing;
+                var keys = ring.Keys.Where(k => k.Status != JwtKeyStatus.Disabled).ToArray();
+
+                var active = !string.IsNullOrWhiteSpace(ring.ActiveSigningKid)
+                    ? keys.FirstOrDefault(k => string.Equals(k.Kid, ring.ActiveSigningKid, StringComparison.Ordinal))
+                    : null;
+                active ??= keys.FirstOrDefault(k => k.Status == JwtKeyStatus.Active);
+                active ??= keys.First();
+
+                var alg = string.IsNullOrWhiteSpace(active.Algorithm) ? "RS256" : active.Algorithm.Trim();
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    var rsaPublic = !string.IsNullOrWhiteSpace(active.PublicKeyPem)
+                        ? TryLoadRsa(active.PublicKeyPem)
+                        : (!string.IsNullOrWhiteSpace(active.PrivateKeyPem) ? CreateRsaPublic(CreateOrLoadRsaPrivate(active.PrivateKeyPem)) : null);
+
+                    _state = new KeyState("RS256", active.Kid, rsaPublic, null);
+                    return _state;
+                }
+
+                var symKey = string.IsNullOrWhiteSpace(active.SymmetricKey) ? null : Encoding.UTF8.GetBytes(active.SymmetricKey);
+                _state = new KeyState(alg.ToUpperInvariant(), active.Kid, null, symKey);
+                return _state;
+            }
+
+            var legacyAlg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? "RS256" : opts.SigningAlgorithm.Trim();
+            if (legacyAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+            {
                 var rsaPrivate = CreateOrLoadRsaPrivate(opts.SigningKey);
                 var rsaPublic = RSA.Create();
                 rsaPublic.ImportParameters(rsaPrivate.ExportParameters(includePrivateParameters: false));
@@ -64,17 +98,38 @@ public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
                 return _state;
             }
 
-            var symKey = string.IsNullOrWhiteSpace(opts.SigningKey)
+            var legacySym = string.IsNullOrWhiteSpace(opts.SigningKey)
                 ? null
                 : Encoding.UTF8.GetBytes(opts.SigningKey);
 
-            var symKid = !string.IsNullOrWhiteSpace(opts.Kid)
+            var legacyKid = !string.IsNullOrWhiteSpace(opts.Kid)
                 ? opts.Kid!
                 : "sym";
 
-            _state = new KeyState(alg.ToUpperInvariant(), symKid, null, symKey);
+            _state = new KeyState(legacyAlg.ToUpperInvariant(), legacyKid, null, legacySym);
             return _state;
         }
+    }
+
+    private static RSA? TryLoadRsa(string pem)
+    {
+        try
+        {
+            var rsa = RSA.Create();
+            rsa.ImportFromPem(pem);
+            return rsa;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static RSA CreateRsaPublic(RSA rsaPrivate)
+    {
+        var rsaPublic = RSA.Create();
+        rsaPublic.ImportParameters(rsaPrivate.ExportParameters(includePrivateParameters: false));
+        return rsaPublic;
     }
 
     private static RSA CreateOrLoadRsaPrivate(string? signingKey)

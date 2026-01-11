@@ -7,6 +7,7 @@ using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authentication.Jwt;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,6 +16,10 @@ using System.Text.Json;
 public sealed class RepositoryTokenService : ITokenService
 {
     private readonly IOptionsMonitor<JwtOptions> _jwtOptions;
+    private readonly IOptionsMonitor<SecurityEnvironmentOptions> _envOptions;
+    private readonly IOptionsMonitor<SecuritySafetyOptions> _safetyOptions;
+    private readonly IHostEnvironment _hostEnvironment;
+    private readonly IOptionsMonitor<RefreshTokenHashingOptions> _refreshHashing;
     private readonly IJwtKeyProvider _keys;
     private readonly ITenantRepository _tenants;
     private readonly ISubjectRepository _subjects;
@@ -24,6 +29,10 @@ public sealed class RepositoryTokenService : ITokenService
 
     public RepositoryTokenService(
         IOptionsMonitor<JwtOptions> jwtOptions,
+        IOptionsMonitor<SecurityEnvironmentOptions> envOptions,
+        IOptionsMonitor<SecuritySafetyOptions> safetyOptions,
+        IHostEnvironment hostEnvironment,
+        IOptionsMonitor<RefreshTokenHashingOptions> refreshHashing,
         IJwtKeyProvider keys,
         ITenantRepository tenants,
         ISubjectRepository subjects,
@@ -32,6 +41,10 @@ public sealed class RepositoryTokenService : ITokenService
         ISessionStore sessions)
     {
         _jwtOptions = jwtOptions;
+        _envOptions = envOptions;
+        _safetyOptions = safetyOptions;
+        _hostEnvironment = hostEnvironment;
+        _refreshHashing = refreshHashing;
         _keys = keys;
         _tenants = tenants;
         _subjects = subjects;
@@ -62,28 +75,19 @@ public sealed class RepositoryTokenService : ITokenService
             return AccessTokenValidationResult.Fail("invalid_token");
         }
 
-        if (!string.Equals(tokenAlg, _keys.Algorithm, StringComparison.OrdinalIgnoreCase))
+        if (!TryGetHeaderKid(headerJson, out var tokenKid))
         {
+            // Spec requires kid.
             return AccessTokenValidationResult.Fail("invalid_token");
         }
 
-        if (!VerifySignature(parts[0] + "." + parts[1], parts[2]))
+        if (!VerifySignature(parts[0] + "." + parts[1], parts[2], tokenAlg, tokenKid, opts))
         {
             return AccessTokenValidationResult.Fail("invalid_token");
         }
 
         using var doc = JsonDocument.Parse(payloadJson);
         var root = doc.RootElement;
-
-        if (!TryGetString(root, "iss", out var iss) || !string.Equals(iss, opts.Issuer, StringComparison.Ordinal))
-        {
-            return AccessTokenValidationResult.Fail("invalid_issuer");
-        }
-
-        if (!TryAudienceContains(root, opts.Audience))
-        {
-            return AccessTokenValidationResult.Fail("invalid_audience");
-        }
 
         if (!TryGetLong(root, "exp", out var exp))
         {
@@ -100,6 +104,40 @@ public sealed class RepositoryTokenService : ITokenService
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
         {
             return AccessTokenValidationResult.Fail("invalid_tenant");
+        }
+
+        // Environment isolation (runtime): require env claim match when safety enabled or outside Development.
+        var safety = _safetyOptions.CurrentValue;
+        var enforceEnv = safety.Enabled || !_hostEnvironment.IsDevelopment();
+        if (enforceEnv)
+        {
+            var env = _envOptions.CurrentValue;
+            if (string.IsNullOrWhiteSpace(env.EnvironmentId))
+            {
+                return AccessTokenValidationResult.Fail("invalid_environment");
+            }
+
+            if (!TryGetString(root, TokenConstants.EnvironmentIdClaim, out var tokenEnv) || !string.Equals(tokenEnv, env.EnvironmentId, StringComparison.Ordinal))
+            {
+                return AccessTokenValidationResult.Fail("env_mismatch");
+            }
+        }
+
+        var eff = JwtTenantResolution.Resolve(opts, tenantId);
+        var legacyIssuer = eff.Issuer;
+        var legacyAudience = eff.Audience;
+        var envScopedIssuer = JwtTenantResolution.ApplyEnvironmentSuffix(legacyIssuer, _envOptions.CurrentValue);
+        var envScopedAudience = JwtTenantResolution.ApplyEnvironmentSuffix(legacyAudience, _envOptions.CurrentValue);
+
+        if (!TryGetString(root, "iss", out var iss)
+            || (!string.Equals(iss, legacyIssuer, StringComparison.Ordinal) && !string.Equals(iss, envScopedIssuer, StringComparison.Ordinal)))
+        {
+            return AccessTokenValidationResult.Fail("invalid_issuer");
+        }
+
+        if (!TryAudienceContains(root, legacyAudience) && !TryAudienceContains(root, envScopedAudience))
+        {
+            return AccessTokenValidationResult.Fail("invalid_audience");
         }
 
         if (!TryGetString(root, "sub", out var subRaw) || !Guid.TryParse(subRaw, out var ourSubject))
@@ -219,6 +257,14 @@ public sealed class RepositoryTokenService : ITokenService
         if (dto is null)
         {
             return RefreshResult.Fail("invalid_refresh_token");
+        }
+
+        // refresh token reuse detection (rotation): old token used again => revoke whole session
+        if (dto.RevokedAt is not null && dto.ReplacedByRefreshTokenId is not null)
+        {
+            _ = await _refresh.RevokeAllBySessionAsync(dto.TenantId, dto.SessionId, now, cancellationToken);
+            _ = await _sessions.TerminateSessionAsync(dto.TenantId, dto.SessionId, now, reason: "refresh_reuse", cancellationToken);
+            return RefreshResult.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected);
         }
 
         if (!dto.IsValid(now))
@@ -342,8 +388,9 @@ public sealed class RepositoryTokenService : ITokenService
         var now = DateTimeOffset.UtcNow;
         var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
 
-        var alg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? _keys.Algorithm : opts.SigningAlgorithm;
-        var kid = !string.IsNullOrWhiteSpace(opts.Kid) ? opts.Kid : _keys.Kid;
+        var signing = ResolveSigningKey(opts);
+        var alg = signing.Algorithm;
+        var kid = signing.Kid;
 
         var header = new Dictionary<string, object?>
         {
@@ -352,13 +399,18 @@ public sealed class RepositoryTokenService : ITokenService
             ["kid"] = kid,
         };
 
+        var env = _envOptions.CurrentValue;
+        var iss = JwtTenantResolution.ApplyEnvironmentSuffix(JwtTenantResolution.Resolve(opts, tenantId).Issuer, env);
+        var aud = JwtTenantResolution.ApplyEnvironmentSuffix(JwtTenantResolution.Resolve(opts, tenantId).Audience, env);
+
         var payload = new Dictionary<string, object?>
         {
-            ["iss"] = opts.Issuer,
-            ["aud"] = opts.Audience,
+            ["iss"] = iss,
+            ["aud"] = aud,
             ["exp"] = exp.ToUnixTimeSeconds(),
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.ToUnixTimeSeconds(),
+            [TokenConstants.TokenFormatVersionClaim] = TokenConstants.TokenFormatVersion,
             [SecurityClaimTypes.Jti] = jti,
             [SecurityClaimTypes.SessionId] = sessionId.ToString(),
             ["sub"] = ourSubject.ToString(),
@@ -367,6 +419,11 @@ public sealed class RepositoryTokenService : ITokenService
             [SecurityClaimTypes.TenantTokenVersion] = tenantTokenVersion,
             [SecurityClaimTypes.SubjectTokenVersion] = subjectTokenVersion,
         };
+
+        if (!string.IsNullOrWhiteSpace(env.EnvironmentId))
+        {
+            payload[TokenConstants.EnvironmentIdClaim] = env.EnvironmentId;
+        }
 
         if (roles is { Count: > 0 })
         {
@@ -386,55 +443,214 @@ public sealed class RepositoryTokenService : ITokenService
         var payloadPart = Base64Url.Encode(Encoding.UTF8.GetBytes(payloadJson));
         var signingInput = headerPart + "." + payloadPart;
 
-        var signature = Sign(signingInput);
+        var signature = Sign(signingInput, signing);
         return signingInput + "." + signature;
     }
 
-    private string Sign(string signingInput)
+    private sealed record SigningKey(string Algorithm, string Kid, RSA? RsaPrivate, byte[]? SymmetricKey);
+
+    private SigningKey ResolveSigningKey(JwtOptions opts)
     {
-        if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        if (opts.KeyRing?.Keys is { Length: > 0 })
         {
-            var rsa = _keys.GetRsaPrivateKey();
-            if (rsa is null)
+            var ring = opts.KeyRing;
+            var keys = ring.Keys.Where(k => k.Status == JwtKeyStatus.Active).ToArray();
+
+            var active = !string.IsNullOrWhiteSpace(ring.ActiveSigningKid)
+                ? keys.FirstOrDefault(k => string.Equals(k.Kid, ring.ActiveSigningKid, StringComparison.Ordinal))
+                : null;
+            active ??= keys.FirstOrDefault();
+
+            if (active is not null)
+            {
+                var alg = string.IsNullOrWhiteSpace(active.Algorithm) ? "RS256" : active.Algorithm.Trim();
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(active.PrivateKeyPem))
+                    {
+                        throw new InvalidOperationException("JwtOptions.KeyRing signing key requires PrivateKeyPem for RS256.");
+                    }
+
+                    return new SigningKey("RS256", active.Kid, TryLoadRsa(active.PrivateKeyPem), null);
+                }
+
+                if (alg.StartsWith("HS", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(active.SymmetricKey))
+                    {
+                        throw new InvalidOperationException("JwtOptions.KeyRing signing key requires SymmetricKey for HS*.");
+                    }
+
+                    return new SigningKey(alg.ToUpperInvariant(), active.Kid, null, Encoding.UTF8.GetBytes(active.SymmetricKey));
+                }
+            }
+        }
+
+        // Legacy single-key provider
+        var legacyAlg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? _keys.Algorithm : opts.SigningAlgorithm;
+        var legacyKid = !string.IsNullOrWhiteSpace(opts.Kid) ? opts.Kid : _keys.Kid;
+        if (legacyAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        {
+            return new SigningKey("RS256", legacyKid ?? _keys.Kid, _keys.GetRsaPrivateKey(), null);
+        }
+
+        return new SigningKey(legacyAlg.ToUpperInvariant(), legacyKid ?? _keys.Kid, null, _keys.GetSymmetricKeyBytes());
+    }
+
+    private static string Sign(string signingInput, SigningKey signing)
+    {
+        if (signing.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        {
+            if (signing.RsaPrivate is null)
             {
                 throw new InvalidOperationException("RS256 requires an RSA private key.");
             }
 
-            var sig = rsa.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var sig = signing.RsaPrivate.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
             return Base64Url.Encode(sig);
         }
 
-        var key = _keys.GetSymmetricKeyBytes();
-        if (key is null || key.Length == 0)
+        if (signing.SymmetricKey is null || signing.SymmetricKey.Length == 0)
         {
-            throw new InvalidOperationException("HMAC signing requires JwtOptions.SigningKey.");
+            throw new InvalidOperationException("HMAC signing requires a symmetric key.");
         }
 
-        return ComputeHmacSha256(signingInput, key);
+        return ComputeHmacSha256(signingInput, signing.SymmetricKey);
     }
 
-    private bool VerifySignature(string signingInput, string signaturePart)
+    private bool VerifySignature(string signingInput, string signaturePart, string tokenAlg, string tokenKid, JwtOptions opts)
     {
-        if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        foreach (var v in ResolveValidationKeys(tokenAlg, tokenKid, opts))
         {
-            var rsa = _keys.GetRsaPublicKey();
-            if (rsa is null)
+            if (tokenAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                if (v.RsaPublic is null)
+                {
+                    continue;
+                }
+
+                var sigBytes = Base64Url.Decode(signaturePart);
+                if (v.RsaPublic.VerifyData(Encoding.ASCII.GetBytes(signingInput), sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
+                {
+                    return true;
+                }
+
+                continue;
             }
 
-            var sigBytes = Base64Url.Decode(signaturePart);
-            return rsa.VerifyData(Encoding.ASCII.GetBytes(signingInput), sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            if (tokenAlg.StartsWith("HS", StringComparison.OrdinalIgnoreCase))
+            {
+                if (v.SymmetricKey is null || v.SymmetricKey.Length == 0)
+                {
+                    continue;
+                }
+
+                var expected = ComputeHmacSha256(signingInput, v.SymmetricKey);
+                if (CryptographicOperations.FixedTimeEquals(Base64Url.Decode(signaturePart), Base64Url.Decode(expected)))
+                {
+                    return true;
+                }
+            }
         }
 
-        var key = _keys.GetSymmetricKeyBytes();
-        if (key is null || key.Length == 0)
+        return false;
+    }
+
+    private sealed record ValidationKey(string Kid, RSA? RsaPublic, byte[]? SymmetricKey);
+
+    private IEnumerable<ValidationKey> ResolveValidationKeys(string tokenAlg, string tokenKid, JwtOptions opts)
+    {
+        if (opts.KeyRing?.Keys is { Length: > 0 })
         {
-            return false;
+            foreach (var k in opts.KeyRing.Keys)
+            {
+                if (k.Status == JwtKeyStatus.Disabled)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(k.Kid, tokenKid, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var alg = string.IsNullOrWhiteSpace(k.Algorithm) ? "RS256" : k.Algorithm.Trim();
+                if (!string.Equals(alg, tokenAlg, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    var rsa = TryLoadRsa(k.PublicKeyPem) ?? (!string.IsNullOrWhiteSpace(k.PrivateKeyPem) ? CreatePublicFromPrivate(k.PrivateKeyPem) : null);
+                    yield return new ValidationKey(k.Kid, rsa, null);
+                    continue;
+                }
+
+                if (alg.StartsWith("HS", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(k.SymmetricKey))
+                {
+                    yield return new ValidationKey(k.Kid, null, Encoding.UTF8.GetBytes(k.SymmetricKey));
+                }
+            }
         }
 
-        var expected = ComputeHmacSha256(signingInput, key);
-        return CryptographicOperations.FixedTimeEquals(Base64Url.Decode(signaturePart), Base64Url.Decode(expected));
+        // Legacy fallback
+        if (_keys.Algorithm.Equals(tokenAlg, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(_keys.Kid, tokenKid, StringComparison.Ordinal))
+        {
+            if (tokenAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return new ValidationKey(_keys.Kid, _keys.GetRsaPublicKey(), null);
+            }
+            else
+            {
+                yield return new ValidationKey(_keys.Kid, null, _keys.GetSymmetricKeyBytes());
+            }
+        }
+    }
+
+    private static RSA? TryLoadRsa(string? pemOrBase64)
+    {
+        if (string.IsNullOrWhiteSpace(pemOrBase64))
+        {
+            return null;
+        }
+
+        try
+        {
+            var rsa = RSA.Create();
+            rsa.ImportFromPem(pemOrBase64);
+            return rsa;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(pemOrBase64);
+            var rsa = RSA.Create();
+            rsa.ImportPkcs8PrivateKey(bytes, out _);
+            return rsa;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static RSA? CreatePublicFromPrivate(string privatePem)
+    {
+        var rsaPriv = TryLoadRsa(privatePem);
+        if (rsaPriv is null)
+        {
+            return null;
+        }
+
+        var rsaPub = RSA.Create();
+        rsaPub.ImportParameters(rsaPriv.ExportParameters(includePrivateParameters: false));
+        return rsaPub;
     }
 
     private static bool TryGetHeaderAlg(string headerJson, out string alg)
@@ -454,6 +670,26 @@ public sealed class RepositoryTokenService : ITokenService
         }
 
         alg = string.Empty;
+        return false;
+    }
+
+    private static bool TryGetHeaderKid(string headerJson, out string kid)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(headerJson);
+            if (doc.RootElement.TryGetProperty("kid", out var k) && k.ValueKind == JsonValueKind.String)
+            {
+                kid = k.GetString() ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(kid);
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        kid = string.Empty;
         return false;
     }
 
@@ -528,9 +764,18 @@ public sealed class RepositoryTokenService : ITokenService
         };
     }
 
-    private static string HashRefreshToken(string refreshToken)
+    private string HashRefreshToken(string refreshToken)
     {
         var bytes = Encoding.UTF8.GetBytes(refreshToken);
+        var opts = _refreshHashing.CurrentValue;
+
+        if (!string.IsNullOrWhiteSpace(opts.Pepper))
+        {
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
+            var mac = hmac.ComputeHash(bytes);
+            return Base64Url.Encode(mac);
+        }
+
         var hash = SHA256.HashData(bytes);
         return Base64Url.Encode(hash);
     }

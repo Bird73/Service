@@ -81,6 +81,13 @@ public sealed class EfRefreshTokenRepository : IRefreshTokenRepository
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, revokedAt), cancellationToken);
     }
 
+    public async Task<int> RevokeAllBySessionAsync(Guid tenantId, Guid sessionId, DateTimeOffset revokedAt, CancellationToken cancellationToken = default)
+    {
+        return await _db.RefreshTokens
+            .Where(x => x.TenantId == tenantId && x.SessionId == sessionId && x.RevokedAt == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, revokedAt), cancellationToken);
+    }
+
     public async Task<int> DeleteExpiredAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
         return await _db.RefreshTokens

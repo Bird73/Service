@@ -1,5 +1,7 @@
 namespace Birdsoft.Security.Abstractions.Options;
 
+using System;
+
 /// <summary>
 /// JWT 簽發與驗證設定。
 /// </summary>
@@ -30,6 +32,18 @@ public sealed class JwtOptions
     /// </summary>
     public string? Kid { get; init; }
 
+    /// <summary>
+    /// Key ring rotation 設定：支援多把 key 並行驗證。
+    /// 若有設定 KeyRing.Keys，簽章會使用 ActiveSigningKid 或第一把 Active 可簽章的 key。
+    /// </summary>
+    public JwtKeyRingOptions? KeyRing { get; init; }
+
+    /// <summary>
+    /// Tenant-scoped JWT settings.
+    /// When configured, each tenant can have its own issuer/audience and independent key ring.
+    /// </summary>
+    public JwtTenantOptions[] Tenants { get; init; } = Array.Empty<JwtTenantOptions>();
+
     /// <summary>Access Token 有效分鐘數</summary>
     public int AccessTokenMinutes { get; init; } = 10;
 
@@ -38,4 +52,59 @@ public sealed class JwtOptions
 
     /// <summary>Clock skew（秒）</summary>
     public int ClockSkewSeconds { get; init; } = 30;
+}
+
+public sealed class JwtTenantOptions
+{
+    public Guid TenantId { get; init; }
+
+    /// <summary>Token issuer (iss) override for this tenant.</summary>
+    public string? Issuer { get; init; }
+
+    /// <summary>Token audience (aud) override for this tenant.</summary>
+    public string? Audience { get; init; }
+
+    /// <summary>
+    /// Per-tenant key ring. If set, must not be shared across tenants.
+    /// </summary>
+    public JwtKeyRingOptions? KeyRing { get; init; }
+
+    /// <summary>
+    /// Legacy single-key override per tenant.
+    /// </summary>
+    public string? SigningKey { get; init; }
+
+    public string? SigningAlgorithm { get; init; }
+
+    public string? Kid { get; init; }
+}
+
+public sealed class JwtKeyRingOptions
+{
+    public string? ActiveSigningKid { get; init; }
+
+    public JwtKeyMaterialOptions[] Keys { get; init; } = Array.Empty<JwtKeyMaterialOptions>();
+}
+
+public enum JwtKeyStatus
+{
+    Active = 0,
+    Retired = 1,
+    Disabled = 2,
+}
+
+public sealed class JwtKeyMaterialOptions
+{
+    public string Kid { get; init; } = string.Empty;
+    public string Algorithm { get; init; } = "RS256";
+    public JwtKeyStatus Status { get; init; } = JwtKeyStatus.Active;
+
+    /// <summary>PEM private key（PKCS#8 / PKCS#1）。僅簽章端需要。</summary>
+    public string? PrivateKeyPem { get; init; }
+
+    /// <summary>PEM public key（可選）。若未提供且有 private key，會從 private 推導。</summary>
+    public string? PublicKeyPem { get; init; }
+
+    /// <summary>Symmetric key for HS* algorithms (UTF-8 string)。</summary>
+    public string? SymmetricKey { get; init; }
 }

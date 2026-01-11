@@ -1,8 +1,9 @@
 namespace Birdsoft.Security.Authentication.Jwt;
 
+using Birdsoft.Security.Abstractions.Services;
 using System.Security.Cryptography;
 
-public interface IJwtKeyProvider
+public interface IJwtKeyProvider : IJwksProvider
 {
     string Algorithm { get; }
     string Kid { get; }
@@ -21,6 +22,4 @@ public interface IJwtKeyProvider
     /// Returns the symmetric key bytes for HMAC algorithms.
     /// </summary>
     byte[]? GetSymmetricKeyBytes();
-
-    object GetJwksDocument();
 }

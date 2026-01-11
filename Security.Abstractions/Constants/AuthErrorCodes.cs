@@ -17,6 +17,9 @@ public static class AuthErrorCodes
     public const string TokenVersionMismatch = "token_version_mismatch";
     public const string RefreshTokenReuseDetected = "refresh_token_reuse_detected";
     public const string AccessTokenRevoked = "access_token_revoked";
+    public const string RateLimited = "rate_limited";
+    public const string BruteForceBlocked = "brute_force_blocked";
+    public const string BruteForceDelayed = "brute_force_delayed";
     public const string UserNotFound = "user_not_found";
     public const string TenantNotFound = "tenant_not_found";
 }

@@ -6,6 +6,8 @@ using Birdsoft.Security.Abstractions.Models;
 using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Text;
 using System.Text.Json;
@@ -102,9 +104,13 @@ public sealed class OidcFlowSkeletonTests
         };
 
         IOptionsMonitor<JwtOptions> monitor = new FakeOptionsMonitor<JwtOptions>(jwt);
+        IOptionsMonitor<SecurityEnvironmentOptions> env = new FakeOptionsMonitor<SecurityEnvironmentOptions>(new SecurityEnvironmentOptions { EnvironmentId = "test" });
+        IOptionsMonitor<SecuritySafetyOptions> safety = new FakeOptionsMonitor<SecuritySafetyOptions>(new SecuritySafetyOptions { Enabled = false, RequireEnvironmentId = false, EnforceTenantJwtIsolation = false });
+        IHostEnvironment hostEnvironment = new FakeHostEnvironment { EnvironmentName = Environments.Development };
+        IOptionsMonitor<RefreshTokenHashingOptions> hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions());
         var keys = new Birdsoft.Security.Authentication.Jwt.DefaultJwtKeyProvider(monitor);
         var sessions = new Birdsoft.Security.Authentication.InMemorySessionStore();
-        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, keys, sessions);
+        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, env, safety, hostEnvironment, hashing, keys, sessions);
         var authState = new Birdsoft.Security.Authentication.InMemoryAuthStateService();
         var oidc = new Birdsoft.Security.Authentication.InMemoryOidcProviderService();
         var external = new Birdsoft.Security.Authentication.InMemoryExternalIdentityStore();
@@ -177,5 +183,13 @@ public sealed class OidcFlowSkeletonTests
         public T CurrentValue => current;
         public T Get(string? name) => current;
         public IDisposable? OnChange(Action<T, string?> listener) => null;
+    }
+
+    private sealed class FakeHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "test";
+        public string ContentRootPath { get; set; } = string.Empty;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

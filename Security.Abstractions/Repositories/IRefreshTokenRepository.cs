@@ -42,6 +42,15 @@ public interface IRefreshTokenRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 撤銷指定 session 的所有 refresh token（用於 refresh token reuse / 裝置異常等情境）。
+    /// </summary>
+    Task<int> RevokeAllBySessionAsync(
+        Guid tenantId,
+        Guid sessionId,
+        DateTimeOffset revokedAt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 清理過期的 refresh token
     /// </summary>
     Task<int> DeleteExpiredAsync(

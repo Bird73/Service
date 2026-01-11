@@ -6,6 +6,7 @@ using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authentication.Jwt;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -20,17 +21,32 @@ public sealed class InMemoryTokenService : ITokenService
         Guid SessionId,
         DateTimeOffset ExpiresAt,
         bool Revoked,
-        string? ReplacedBy);
+        string? ReplacedByTokenHash);
 
     private readonly IOptionsMonitor<JwtOptions> _jwtOptions;
+    private readonly IOptionsMonitor<SecurityEnvironmentOptions> _envOptions;
+    private readonly IOptionsMonitor<SecuritySafetyOptions> _safetyOptions;
+    private readonly IHostEnvironment _hostEnvironment;
+    private readonly IOptionsMonitor<RefreshTokenHashingOptions> _refreshHashing;
     private readonly IJwtKeyProvider _keys;
     private readonly ISessionStore _sessions;
     private readonly ConcurrentDictionary<string, RefreshRecord> _refresh = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(Guid TenantId, string Jti), byte> _revokedJti = new();
 
-    public InMemoryTokenService(IOptionsMonitor<JwtOptions> jwtOptions, IJwtKeyProvider keys, ISessionStore sessions)
+    public InMemoryTokenService(
+        IOptionsMonitor<JwtOptions> jwtOptions,
+        IOptionsMonitor<SecurityEnvironmentOptions> envOptions,
+        IOptionsMonitor<SecuritySafetyOptions> safetyOptions,
+        IHostEnvironment hostEnvironment,
+        IOptionsMonitor<RefreshTokenHashingOptions> refreshHashing,
+        IJwtKeyProvider keys,
+        ISessionStore sessions)
     {
         _jwtOptions = jwtOptions;
+        _envOptions = envOptions;
+        _safetyOptions = safetyOptions;
+        _hostEnvironment = hostEnvironment;
+        _refreshHashing = refreshHashing;
         _keys = keys;
         _sessions = sessions;
     }
@@ -71,16 +87,6 @@ public sealed class InMemoryTokenService : ITokenService
         using var doc = JsonDocument.Parse(payloadJson);
         var root = doc.RootElement;
 
-        if (!TryGetString(root, "iss", out var iss) || !string.Equals(iss, opts.Issuer, StringComparison.Ordinal))
-        {
-            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_issuer"));
-        }
-
-        if (!TryAudienceContains(root, opts.Audience))
-        {
-            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_audience"));
-        }
-
         if (!TryGetLong(root, "exp", out var exp))
         {
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
@@ -96,6 +102,40 @@ public sealed class InMemoryTokenService : ITokenService
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
         {
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_tenant"));
+        }
+
+        // Environment isolation (runtime): require env claim match when safety enabled or outside Development.
+        var safety = _safetyOptions.CurrentValue;
+        var enforceEnv = safety.Enabled || !_hostEnvironment.IsDevelopment();
+        if (enforceEnv)
+        {
+            var env = _envOptions.CurrentValue;
+            if (string.IsNullOrWhiteSpace(env.EnvironmentId))
+            {
+                return Task.FromResult(AccessTokenValidationResult.Fail("invalid_environment"));
+            }
+
+            if (!TryGetString(root, TokenConstants.EnvironmentIdClaim, out var tokenEnv) || !string.Equals(tokenEnv, env.EnvironmentId, StringComparison.Ordinal))
+            {
+                return Task.FromResult(AccessTokenValidationResult.Fail("env_mismatch"));
+            }
+        }
+
+        var eff = JwtTenantResolution.Resolve(opts, tenantId);
+        var legacyIssuer = eff.Issuer;
+        var legacyAudience = eff.Audience;
+        var envScopedIssuer = JwtTenantResolution.ApplyEnvironmentSuffix(legacyIssuer, _envOptions.CurrentValue);
+        var envScopedAudience = JwtTenantResolution.ApplyEnvironmentSuffix(legacyAudience, _envOptions.CurrentValue);
+
+        if (!TryGetString(root, "iss", out var iss)
+            || (!string.Equals(iss, legacyIssuer, StringComparison.Ordinal) && !string.Equals(iss, envScopedIssuer, StringComparison.Ordinal)))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_issuer"));
+        }
+
+        if (!TryAudienceContains(root, legacyAudience) && !TryAudienceContains(root, envScopedAudience))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_audience"));
         }
 
         if (!TryGetString(root, "sub", out var subRaw) || !Guid.TryParse(subRaw, out var ourSubject))
@@ -147,7 +187,7 @@ public sealed class InMemoryTokenService : ITokenService
 
         var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
         var refreshExpires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, opts.RefreshTokenDays));
-        _refresh[refreshToken] = new RefreshRecord(tenantId, ourSubject, sessionId, refreshExpires, Revoked: false, ReplacedBy: null);
+        _refresh[HashRefreshToken(refreshToken)] = new RefreshRecord(tenantId, ourSubject, sessionId, refreshExpires, Revoked: false, ReplacedByTokenHash: null);
 
         return Task.FromResult(new TokenPair
         {
@@ -160,7 +200,8 @@ public sealed class InMemoryTokenService : ITokenService
     public Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
-        if (!_refresh.TryGetValue(refreshToken, out var rec))
+        var tokenHash = HashRefreshToken(refreshToken);
+        if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
             return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
         }
@@ -177,25 +218,53 @@ public sealed class InMemoryTokenService : ITokenService
 
         if (rec.Revoked)
         {
+            if (!string.IsNullOrWhiteSpace(rec.ReplacedByTokenHash))
+            {
+                // reuse detected => revoke whole session
+                foreach (var (token, r) in _refresh)
+                {
+                    if (r.TenantId == rec.TenantId && r.SessionId == rec.SessionId && !r.Revoked)
+                    {
+                        _refresh[token] = r with { Revoked = true };
+                    }
+                }
+
+                _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, DateTimeOffset.UtcNow, reason: "refresh_reuse", cancellationToken)
+                    .GetAwaiter()
+                    .GetResult();
+
+                return Task.FromResult(RefreshResult.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected));
+            }
+
             return Task.FromResult(RefreshResult.Fail("revoked_refresh_token"));
         }
 
         // rotation
         var newRefresh = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
-        var replaced = rec with { Revoked = true, ReplacedBy = newRefresh };
-        _refresh[refreshToken] = replaced;
+        var newHash = HashRefreshToken(newRefresh);
+        var replaced = rec with { Revoked = true, ReplacedByTokenHash = newHash };
+        _refresh[tokenHash] = replaced;
 
-        var newRec = new RefreshRecord(rec.TenantId, rec.OurSubject, rec.SessionId, rec.ExpiresAt, Revoked: false, ReplacedBy: null);
-        _refresh[newRefresh] = newRec;
+        var newRec = new RefreshRecord(rec.TenantId, rec.OurSubject, rec.SessionId, rec.ExpiresAt, Revoked: false, ReplacedByTokenHash: null);
+        _refresh[newHash] = newRec;
 
-        return GenerateTokensAsync(rec.TenantId, rec.OurSubject, roles: null, scopes: null, cancellationToken)
-            .ContinueWith(t => RefreshResult.Success(t.Result), cancellationToken);
+        var opts = _jwtOptions.CurrentValue;
+        var jti = Guid.NewGuid().ToString("N");
+        var accessToken = CreateAccessToken(opts, rec.TenantId, rec.OurSubject, jti, rec.SessionId, roles: null, scopes: null);
+
+        return Task.FromResult(RefreshResult.Success(new TokenPair
+        {
+            AccessToken = accessToken,
+            RefreshToken = newRefresh,
+            ExpiresIn = Math.Max(1, opts.AccessTokenMinutes) * 60,
+        }));
     }
 
     public Task<RevokeResult> RevokeAsync(Guid tenantId, Guid ourSubject, string refreshToken, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
-        if (!_refresh.TryGetValue(refreshToken, out var rec))
+        var tokenHash = HashRefreshToken(refreshToken);
+        if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
             return Task.FromResult(RevokeResult.Fail("refresh_token_not_found"));
         }
@@ -205,7 +274,7 @@ public sealed class InMemoryTokenService : ITokenService
             return Task.FromResult(RevokeResult.Fail("forbidden"));
         }
 
-        _refresh[refreshToken] = rec with { Revoked = true };
+        _refresh[tokenHash] = rec with { Revoked = true };
         _ = _sessions.TerminateSessionAsync(tenantId, rec.SessionId, DateTimeOffset.UtcNow, reason: "refresh_revoke", cancellationToken)
             .GetAwaiter()
             .GetResult();
@@ -231,6 +300,22 @@ public sealed class InMemoryTokenService : ITokenService
         return Task.FromResult(count);
     }
 
+    private string HashRefreshToken(string refreshToken)
+    {
+        var opts = _refreshHashing.CurrentValue;
+        var bytes = Encoding.UTF8.GetBytes(refreshToken);
+
+        if (!string.IsNullOrWhiteSpace(opts.Pepper))
+        {
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
+            var mac = hmac.ComputeHash(bytes);
+            return Base64Url.Encode(mac);
+        }
+
+        var hash = SHA256.HashData(bytes);
+        return Base64Url.Encode(hash);
+    }
+
 
     private string CreateAccessToken(
         JwtOptions opts,
@@ -254,19 +339,29 @@ public sealed class InMemoryTokenService : ITokenService
             ["kid"] = kid,
         };
 
+        var env = _envOptions.CurrentValue;
+        var iss = JwtTenantResolution.ApplyEnvironmentSuffix(JwtTenantResolution.Resolve(opts, tenantId).Issuer, env);
+        var aud = JwtTenantResolution.ApplyEnvironmentSuffix(JwtTenantResolution.Resolve(opts, tenantId).Audience, env);
+
         var payload = new Dictionary<string, object?>
         {
-            ["iss"] = opts.Issuer,
-            ["aud"] = opts.Audience,
+            ["iss"] = iss,
+            ["aud"] = aud,
             ["exp"] = exp.ToUnixTimeSeconds(),
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.ToUnixTimeSeconds(),
+            [TokenConstants.TokenFormatVersionClaim] = TokenConstants.TokenFormatVersion,
             [SecurityClaimTypes.Jti] = jti,
             [SecurityClaimTypes.SessionId] = sessionId.ToString(),
             ["sub"] = ourSubject.ToString(),
             [SecurityClaimTypes.TenantId] = tenantId.ToString(),
             [SecurityClaimTypes.OurSubject] = ourSubject.ToString(),
         };
+
+        if (!string.IsNullOrWhiteSpace(env.EnvironmentId))
+        {
+            payload[TokenConstants.EnvironmentIdClaim] = env.EnvironmentId;
+        }
 
         if (roles is { Count: > 0 })
         {

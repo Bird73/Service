@@ -8,4 +8,6 @@ public enum AuthEventType
     TokenRefreshed = 3,
     TokenRevoked = 4,
     SessionTerminated = 5,
+    SecurityDefense = 6,
+    Mfa = 7,
 }

@@ -9,6 +9,8 @@ using Birdsoft.Security.Data.EfCore;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Text;
 using System.Text.Json;
@@ -168,7 +170,14 @@ public sealed class GovernanceSessionInvalidationTests
         services.AddSecurityEfCoreDataAccess();
 
         IOptionsMonitor<JwtOptions> monitor = new FakeOptionsMonitor<JwtOptions>(jwt);
+        IOptionsMonitor<RefreshTokenHashingOptions> hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions());
+        IOptionsMonitor<SecurityEnvironmentOptions> env = new FakeOptionsMonitor<SecurityEnvironmentOptions>(new SecurityEnvironmentOptions { EnvironmentId = "test" });
+        IOptionsMonitor<SecuritySafetyOptions> safety = new FakeOptionsMonitor<SecuritySafetyOptions>(new SecuritySafetyOptions { Enabled = false, RequireEnvironmentId = false, EnforceTenantJwtIsolation = false });
         services.AddSingleton(monitor);
+        services.AddSingleton(env);
+        services.AddSingleton(safety);
+        services.AddSingleton<IHostEnvironment>(new FakeHostEnvironment { EnvironmentName = Environments.Development });
+        services.AddSingleton(hashing);
         services.AddSingleton<Birdsoft.Security.Authentication.Jwt.IJwtKeyProvider>(sp => new Birdsoft.Security.Authentication.Jwt.DefaultJwtKeyProvider(sp.GetRequiredService<IOptionsMonitor<JwtOptions>>()));
 
         services.AddScoped<ITokenService, Birdsoft.Security.Authentication.Persistence.RepositoryTokenService>();
@@ -190,5 +199,13 @@ public sealed class GovernanceSessionInvalidationTests
         public T CurrentValue => current;
         public T Get(string? name) => current;
         public IDisposable? OnChange(Action<T, string?> listener) => null;
+    }
+
+    private sealed class FakeHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "test";
+        public string ContentRootPath { get; set; } = string.Empty;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }

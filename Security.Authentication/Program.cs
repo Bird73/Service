@@ -1,7 +1,13 @@
 using Birdsoft.Security.Abstractions;
+using Birdsoft.Security.Abstractions.Audit;
 using Birdsoft.Security.Abstractions.Contracts.Auth;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Mfa;
 using Birdsoft.Security.Abstractions.Options;
+using Birdsoft.Security.Abstractions.Observability.Correlation;
+using Birdsoft.Security.Abstractions.Observability.Health;
+using Birdsoft.Security.Abstractions.Observability.Metrics;
+using Birdsoft.Security.Abstractions.RateLimiting;
 using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
@@ -9,11 +15,15 @@ using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Authentication;
 using Birdsoft.Security.Authentication.Auth;
 using Birdsoft.Security.Authentication.Jwt;
+using Birdsoft.Security.Authentication.Mfa;
+using Birdsoft.Security.Authentication.Observability.Health;
 using Birdsoft.Security.Authentication.Persistence;
 using Birdsoft.Security.Authentication.Tenancy;
 using Birdsoft.Security.Data.EfCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using System.IdentityModel.Tokens.Jwt;
 
@@ -24,6 +34,12 @@ builder.Services.AddOpenApi();
 builder.Services.AddOptions<JwtOptions>()
     .Bind(builder.Configuration.GetSection(JwtOptions.SectionName));
 
+builder.Services.AddOptions<SecurityEnvironmentOptions>()
+    .Bind(builder.Configuration.GetSection(SecurityEnvironmentOptions.SectionName));
+
+builder.Services.AddOptions<SecuritySafetyOptions>()
+    .Bind(builder.Configuration.GetSection(SecuritySafetyOptions.SectionName));
+
 builder.Services.AddOptions<OidcProviderRegistryOptions>()
     .Bind(builder.Configuration.GetSection(OidcProviderRegistryOptions.SectionName));
 
@@ -32,11 +48,67 @@ builder.Services.AddOptions<OidcProviderOptions>();
 builder.Services.AddOptions<PasswordLoginOptions>()
     .Bind(builder.Configuration.GetSection(PasswordLoginOptions.SectionName));
 
+builder.Services.AddOptions<RateLimitingOptions>()
+    .Bind(builder.Configuration.GetSection(RateLimitingOptions.SectionName));
+
+builder.Services.AddOptions<BruteForceProtectionOptions>()
+    .Bind(builder.Configuration.GetSection(BruteForceProtectionOptions.SectionName));
+
+builder.Services.AddOptions<RefreshTokenHashingOptions>()
+    .Bind(builder.Configuration.GetSection(RefreshTokenHashingOptions.SectionName));
+
+builder.Services.AddOptions<MfaOptions>()
+    .Bind(builder.Configuration.GetSection(MfaOptions.SectionName));
+
+builder.Services.AddOptions<AuditReliabilityOptions>()
+    .Bind(builder.Configuration.GetSection(AuditReliabilityOptions.SectionName));
+
+builder.Services.AddSingleton<IRateLimiterGate, TenantIpRateLimiterGate>();
+builder.Services.AddSingleton<IBruteForceProtection, InMemoryBruteForceProtection>();
+
 builder.Services.AddSingleton<IJwtKeyProvider, DefaultJwtKeyProvider>();
+builder.Services.AddSingleton<IJwksProvider>(sp => sp.GetRequiredService<IJwtKeyProvider>());
+
+builder.Services.AddTransient<CorrelationIdMiddleware>();
+
+builder.Services.AddSingleton<IMfaPolicyProvider, DefaultMfaPolicyProvider>();
+builder.Services.AddSingleton<IMfaChallengeStore, InMemoryMfaChallengeStore>();
+builder.Services.AddSingleton<IMfaVerifier, InMemoryMfaVerifier>();
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer();
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(o =>
+{
+    o.AddPolicy("AdminOnly", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireAssertion(ctx =>
+        {
+            var user = ctx.User;
+            if (user?.Identity?.IsAuthenticated != true)
+            {
+                return false;
+            }
+
+            var scope = user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scope)?.Value
+                ?? user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scopes)?.Value;
+            if (!string.IsNullOrWhiteSpace(scope) && scope.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(s => string.Equals(s, "security.admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var roles = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Roles).Select(c => c.Value)
+                .Concat(user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Role).Select(c => c.Value));
+            if (roles.Any(r => string.Equals(r, "security_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var perms = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Permissions).Select(c => c.Value);
+            return perms.Any(p => string.Equals(p, "security:admin", StringComparison.OrdinalIgnoreCase));
+        });
+    });
+});
 builder.Services.AddSingleton<IPostConfigureOptions<JwtBearerOptions>, BirdsoftJwtBearerPostConfigureOptions>();
 
 builder.Services.AddSingleton<ITenantResolver, HeaderOrClaimTenantResolver>();
@@ -57,13 +129,24 @@ if (useEf)
 }
 else
 {
-    builder.Services.AddSingleton<IAuthEventStore, NoOpAuthEventStore>();
+    builder.Services.AddSingleton<IAuthEventStore, InMemoryAuthEventStore>();
     builder.Services.AddSingleton<IAuthStateService, InMemoryAuthStateService>();
     builder.Services.AddSingleton<IExternalIdentityStore, InMemoryExternalIdentityStore>();
     builder.Services.AddSingleton<ITenantRepository, InMemoryTenantRepository>();
     builder.Services.AddSingleton<ISubjectRepository, InMemorySubjectRepository>();
     builder.Services.AddSingleton<ISessionStore, InMemorySessionStore>();
     builder.Services.AddSingleton<ITokenService, InMemoryTokenService>();
+}
+
+builder.Services.AddScoped<IAuditEventWriter, ResilientAuditEventWriter>();
+
+var hc = builder.Services.AddHealthChecks()
+    .AddCheck<JwtKeySourceHealthCheck>("jwt_keys", tags: ["ready"])
+    .AddCheck<SessionStoreHealthCheck>("session_store", tags: ["ready"]);
+
+if (useEf)
+{
+    hc.AddCheck<SecurityDbHealthCheck>("db", tags: ["ready"]);
 }
 
 // OIDC Provider sources/services
@@ -79,10 +162,24 @@ else
 
 // In-memory skeleton services (可替換為實際實作)
 builder.Services.AddSingleton<IUserProvisioner, InMemoryUserProvisioner>();
-builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
+builder.Services.AddSingleton<InMemoryAuthorizationDataStore>();
+builder.Services.AddSingleton<IAuthorizationDataStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
+builder.Services.AddSingleton<IAuthorizationAdminStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
 builder.Services.AddSingleton<IPasswordAuthenticator, InMemoryPasswordAuthenticator>();
 
 var app = builder.Build();
+
+// Startup safety checks (enabled by default outside Development)
+{
+    var envOpts = app.Services.GetRequiredService<IOptionsMonitor<SecurityEnvironmentOptions>>().CurrentValue;
+    var safety = app.Services.GetRequiredService<IOptionsMonitor<SecuritySafetyOptions>>().CurrentValue;
+    var enabled = safety.Enabled || !app.Environment.IsDevelopment();
+    if (enabled)
+    {
+        var jwt = app.Services.GetRequiredService<IOptionsMonitor<JwtOptions>>().CurrentValue;
+        JwtSafetyChecks.ThrowIfUnsafe(jwt, envOpts, safety);
+    }
+}
 
 if (useEf && app.Environment.IsDevelopment())
 {
@@ -97,143 +194,280 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseMiddleware<TenantResolutionMiddleware>();
 
 var api = app.MapGroup("/api/v1");
 var auth = api.MapGroup("/auth");
+auth.AddEndpointFilter(new MetricsEndpointFilter("auth"));
 
 static IReadOnlyDictionary<string, string[]> SingleField(string field, string message)
     => new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase) { [field] = [message] };
 
 static string? TryGetBearerToken(HttpContext http)
 {
-    if (!http.Request.Headers.TryGetValue("Authorization", out var authHeader))
+    var header = http.Request.Headers.Authorization.ToString();
+    if (string.IsNullOrWhiteSpace(header))
     {
         return null;
     }
 
-    var raw = authHeader.ToString();
-    if (raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+    if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
     {
-        return raw[7..].Trim();
+        return null;
     }
 
-    return null;
+    return header["Bearer ".Length..].Trim();
 }
 
 static async Task<IResult> PasswordLogin(
     HttpContext http,
     LoginRequest request,
-    IPasswordAuthenticator passwords,
+    IPasswordAuthenticator password,
+    IBruteForceProtection bruteForce,
     ITenantRepository tenants,
     ISubjectRepository subjects,
     IAuthorizationDataStore authzData,
     ITokenService tokens,
-    IAuthEventStore events,
+    IMfaPolicyProvider mfaPolicy,
+    IMfaChallengeStore mfaChallenges,
+    IOptionsMonitor<MfaOptions> mfaOptions,
+    IAuditEventWriter audit,
     CancellationToken ct)
 {
+    var tenant = http.GetTenantContext();
+    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
     if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "invalid_request",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "invalid_request",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(
-            ApiResponse<object>.Fail("invalid_request", "username/password is required", SingleField("username", "required")),
+            ApiResponse<object>.Fail(
+                "invalid_request",
+                "username/password is required",
+                new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["username"] = ["required"],
+                    ["password"] = ["required"],
+                }),
             statusCode: StatusCodes.Status400BadRequest);
     }
-
-    var tenant = http.GetTenantContext();
 
     var tenantDto = await tenants.FindAsync(tenant.TenantId, ct);
     if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenant.TenantId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "tenant_not_active",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "tenant_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
     }
 
-    var authn = await passwords.AuthenticateAsync(tenant.TenantId, request.Username, request.Password, ct);
-    if (!authn.Succeeded || authn.OurSubject is null)
+    var decision = await bruteForce.CheckAsync(tenant.TenantId, request.Username, ip, ct);
+    if (!decision.Allowed)
     {
-        var code = authn.ErrorCode ?? "invalid_credentials";
-        var status = code == "password_login_disabled"
-            ? StatusCodes.Status403Forbidden
-            : StatusCodes.Status401Unauthorized;
-
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenant.TenantId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = code,
-            }, ct);
-        }
-        catch
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.BruteForceBlocked,
+            Detail = decision.BlockedUntil?.ToString("O"),
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        if (decision.RetryAfterSeconds is int retry)
         {
+            http.Response.Headers.RetryAfter = retry.ToString();
         }
 
-        return Results.Json(ApiResponse<object>.Fail(code), statusCode: status);
+        return Results.Json(
+            ApiResponse<object>.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.BruteForceBlocked),
+            statusCode: StatusCodes.Status429TooManyRequests);
     }
 
-    var subjectDto = await subjects.FindAsync(tenant.TenantId, authn.OurSubject.Value, ct)
-        ?? await subjects.CreateAsync(tenant.TenantId, authn.OurSubject.Value, ct);
+    if (decision.Delay > TimeSpan.Zero)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "delay",
+            Code = Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.BruteForceDelayed,
+            Detail = $"{(int)decision.Delay.TotalMilliseconds}ms",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        await Task.Delay(decision.Delay, ct);
+    }
+
+    var authResult = await password.AuthenticateAsync(tenant.TenantId, request.Username, request.Password, ct);
+    if (!authResult.Succeeded || authResult.OurSubject is null)
+    {
+        await bruteForce.RecordFailureAsync(
+            tenant.TenantId,
+            request.Username,
+            ip,
+            authResult.ErrorCode ?? Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.InvalidCredentials,
+            ct);
+
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = authResult.ErrorCode ?? Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.InvalidCredentials,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(
+            ApiResponse<object>.Fail(authResult.ErrorCode ?? Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.InvalidCredentials),
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    await bruteForce.RecordSuccessAsync(tenant.TenantId, request.Username, ip, ct);
+
+    var ourSubject = authResult.OurSubject.Value;
+    var subjectDto = await subjects.FindAsync(tenant.TenantId, ourSubject, ct) ?? await subjects.CreateAsync(tenant.TenantId, ourSubject, ct);
     if (subjectDto.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenant.TenantId,
-                OurSubject = authn.OurSubject.Value,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "user_not_active",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "user_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
     }
 
-    var roles = await authzData.GetRolesAsync(tenant.TenantId, authn.OurSubject.Value, ct);
-    var scopes = await authzData.GetScopesAsync(tenant.TenantId, authn.OurSubject.Value, ct);
-    var pair = await tokens.GenerateTokensAsync(tenant.TenantId, authn.OurSubject.Value, roles, scopes, ct);
+    var policy = await mfaPolicy.GetPolicyAsync(tenant.TenantId, ourSubject, ct);
+    var skipRequested = http.Request.Headers.TryGetValue("X-Mfa-Skip", out var skipHeader)
+        && string.Equals(skipHeader.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+
+    if (policy == MfaPolicy.Required)
+    {
+        try
+        {
+            var ch = await mfaChallenges.CreateAsync(tenant.TenantId, ourSubject, ttl: TimeSpan.FromMinutes(5), providerHint: "inmemory", cancellationToken: ct);
+            return Results.Json(ApiResponse<LoginResult>.Ok(new LoginResult(
+                Status: "mfa_required",
+                Tokens: null,
+                Mfa: new MfaChallengeResponse(ch.ChallengeId, ch.ExpiresAt, true, ch.ProviderHint))),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        catch (Exception ex)
+        {
+            if (mfaOptions.CurrentValue.AllowSkipOnProviderFailure)
+            {
+                await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredAt = DateTimeOffset.UtcNow,
+                    TenantId = tenant.TenantId,
+                    OurSubject = ourSubject,
+                    Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+                    Outcome = "skip",
+                    Code = "mfa_skipped_provider_failure",
+                    Detail = ex.GetType().Name,
+                    CorrelationId = http.GetCorrelationId(),
+                    TraceId = http.GetTraceId(),
+                    Ip = ip,
+                    UserAgent = http.Request.Headers.UserAgent.ToString(),
+                }, ct);
+            }
+            else
+            {
+                await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredAt = DateTimeOffset.UtcNow,
+                    TenantId = tenant.TenantId,
+                    OurSubject = ourSubject,
+                    Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+                    Outcome = "fail",
+                    Code = "mfa_unavailable",
+                    Detail = ex.GetType().Name,
+                    CorrelationId = http.GetCorrelationId(),
+                    TraceId = http.GetTraceId(),
+                    Ip = ip,
+                    UserAgent = http.Request.Headers.UserAgent.ToString(),
+                }, ct);
+
+                return Results.Json(ApiResponse<object>.Fail("mfa_unavailable"), statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        }
+    }
+
+    if (policy == MfaPolicy.Optional && skipRequested)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "skip",
+            Code = "mfa_skipped",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+    }
+
+    var roles = await authzData.GetRolesAsync(tenant.TenantId, ourSubject, ct);
+    var scopes = await authzData.GetScopesAsync(tenant.TenantId, ourSubject, ct);
+    var pair = await tokens.GenerateTokensAsync(tenant.TenantId, ourSubject, roles, scopes, ct);
 
     Guid? sessionId = null;
     try
@@ -249,45 +483,309 @@ static async Task<IResult> PasswordLogin(
     {
     }
 
-    try
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
     {
-        await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = tenant.TenantId,
+        OurSubject = ourSubject,
+        SessionId = sessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+        Outcome = "success",
+        Code = "password_login",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = ip,
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
+
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+    {
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = tenant.TenantId,
+        OurSubject = ourSubject,
+        SessionId = sessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenIssued,
+        Outcome = "success",
+        Code = "password_login",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = ip,
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
+
+    return Results.Json(ApiResponse<LoginResult>.Ok(new LoginResult(Status: "success", Tokens: pair, Mfa: null)));
+}
+
+static async Task<IResult> MfaVerify(
+    HttpContext http,
+    MfaVerifyRequest request,
+    ITenantRepository tenants,
+    ISubjectRepository subjects,
+    IAuthorizationDataStore authzData,
+    ITokenService tokens,
+    IMfaChallengeStore mfaChallenges,
+    IMfaVerifier mfaVerifier,
+    IAuditEventWriter audit,
+    CancellationToken ct)
+{
+    var tenant = http.GetTenantContext();
+    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+    if (request.ChallengeId == Guid.Empty || string.IsNullOrWhiteSpace(request.Code))
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
             Id = Guid.NewGuid(),
             OccurredAt = DateTimeOffset.UtcNow,
             TenantId = tenant.TenantId,
-            OurSubject = authn.OurSubject.Value,
-            SessionId = sessionId,
-            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenIssued,
-            Outcome = "success",
-            Detail = "password_login",
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "invalid_request",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("invalid_request"), statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var challenge = await mfaChallenges.FindAsync(request.ChallengeId, ct);
+    if (challenge is null)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "mfa_challenge_not_found",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("mfa_challenge_not_found"), statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    if (challenge.TenantId != tenant.TenantId)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenant.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "tenant_mismatch",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("tenant_mismatch"), statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    if (challenge.ExpiresAt <= DateTimeOffset.UtcNow)
+    {
+        _ = await mfaChallenges.ConsumeAsync(challenge.ChallengeId, ct);
+
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "mfa_expired",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("mfa_expired"), statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var tenantDto = await tenants.FindAsync(challenge.TenantId, ct);
+    if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "tenant_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var subjectDto = await subjects.FindAsync(challenge.TenantId, challenge.OurSubject, ct);
+    if (subjectDto is null)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.UserNotFound,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.UserNotFound), statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    if (subjectDto.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "user_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var verify = await mfaVerifier.VerifyAsync(challenge.TenantId, challenge.OurSubject, request.Code, ct);
+    if (!verify.Succeeded)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = verify.ErrorCode ?? "mfa_failed",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail(verify.ErrorCode ?? "mfa_failed"), statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var consumed = await mfaChallenges.ConsumeAsync(challenge.ChallengeId, ct);
+    if (!consumed)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = challenge.TenantId,
+            OurSubject = challenge.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "fail",
+            Code = "mfa_challenge_already_used",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail("mfa_challenge_already_used"), statusCode: StatusCodes.Status409Conflict);
+    }
+
+    var roles = await authzData.GetRolesAsync(challenge.TenantId, challenge.OurSubject, ct);
+    var scopes = await authzData.GetScopesAsync(challenge.TenantId, challenge.OurSubject, ct);
+    var pair = await tokens.GenerateTokensAsync(challenge.TenantId, challenge.OurSubject, roles, scopes, ct);
+
+    Guid? sessionId = null;
+    try
+    {
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(pair.AccessToken);
+        var sessionClaim = jwt.Claims.FirstOrDefault(c => string.Equals(c.Type, Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.SessionId, StringComparison.Ordinal))?.Value;
+        if (!string.IsNullOrWhiteSpace(sessionClaim) && Guid.TryParse(sessionClaim, out var parsed))
+        {
+            sessionId = parsed;
+        }
     }
     catch
     {
     }
 
-    return Results.Json(ApiResponse<TokenPair>.Ok(pair));
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+    {
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = challenge.TenantId,
+        OurSubject = challenge.OurSubject,
+        SessionId = sessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+        Outcome = "success",
+        Code = "mfa_verified",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = ip,
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
+
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+    {
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = challenge.TenantId,
+        OurSubject = challenge.OurSubject,
+        SessionId = sessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenIssued,
+        Outcome = "success",
+        Code = "mfa_verified",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = ip,
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
+
+    return Results.Json(ApiResponse<LoginResult>.Ok(new LoginResult(Status: "success", Tokens: pair, Mfa: null)));
 }
 
-static async Task<IResult> TokenRefresh(RefreshRequest request, ITokenService tokens, IAuthEventStore events, CancellationToken ct)
+static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request, ITokenService tokens, IAuditEventWriter audit, CancellationToken ct)
 {
     if (string.IsNullOrWhiteSpace(request.RefreshToken))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
-                Outcome = "fail",
-                Detail = "invalid_request",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
+            Outcome = "fail",
+            Code = "invalid_request",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(
             ApiResponse<object>.Fail("invalid_request", "refreshToken is required", SingleField("refreshToken", "required")),
@@ -297,20 +795,18 @@ static async Task<IResult> TokenRefresh(RefreshRequest request, ITokenService to
     var result = await tokens.RefreshAsync(request.RefreshToken, ct);
     if (!result.Succeeded)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
-                Outcome = "fail",
-                Detail = result.ErrorCode ?? "invalid_refresh_token",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
+            Outcome = "fail",
+            Code = result.ErrorCode ?? "invalid_refresh_token",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
     }
 
     if (result.Succeeded && result.Tokens is not null)
@@ -329,20 +825,18 @@ static async Task<IResult> TokenRefresh(RefreshRequest request, ITokenService to
         {
         }
 
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                SessionId = sessionId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
-                Outcome = "success",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            SessionId = sessionId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
+            Outcome = "success",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
     }
 
     return result.Succeeded && result.Tokens is not null
@@ -350,25 +844,23 @@ static async Task<IResult> TokenRefresh(RefreshRequest request, ITokenService to
         : Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "invalid_refresh_token"), statusCode: StatusCodes.Status401Unauthorized);
 }
 
-static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, IAuthEventStore events, CancellationToken ct)
+static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, IAuditEventWriter audit, CancellationToken ct)
 {
     var bearer = TryGetBearerToken(http);
     if (string.IsNullOrWhiteSpace(bearer))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "fail",
-                Detail = "missing_bearer_token",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "fail",
+            Code = "missing_bearer_token",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("missing_bearer_token"), statusCode: StatusCodes.Status401Unauthorized);
     }
@@ -376,40 +868,36 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
     var validation = await tokens.ValidateAccessTokenAsync(bearer, ct);
     if (!validation.Succeeded)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "fail",
-                Detail = validation.ErrorCode ?? "invalid_token",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "fail",
+            Code = validation.ErrorCode ?? "invalid_token",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail(validation.ErrorCode ?? "invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     if (validation.TenantId is null || validation.OurSubject is null)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "fail",
-                Detail = "invalid_token",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "fail",
+            Code = "invalid_token",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
     }
@@ -435,45 +923,41 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
         {
         }
 
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenantId,
-                OurSubject = ourSubject,
-                SessionId = sessionId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "success",
-                Detail = "revoke_all",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            SessionId = sessionId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "success",
+            Code = "revoke_all",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<TokenRevokeResponse>.Ok(new TokenRevokeResponse(revoked)));
     }
 
     if (string.IsNullOrWhiteSpace(request.RefreshToken))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenantId,
-                OurSubject = ourSubject,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "fail",
-                Detail = "invalid_request",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "fail",
+            Code = "invalid_request",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(
             ApiResponse<object>.Fail("invalid_request", "refreshToken is required unless allDevices=true", SingleField("refreshToken", "required")),
@@ -487,22 +971,20 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             ? StatusCodes.Status403Forbidden
             : StatusCodes.Status400BadRequest;
 
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = tenantId,
-                OurSubject = ourSubject,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-                Outcome = "fail",
-                Detail = result.ErrorCode ?? "revoke_failed",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+            Outcome = "fail",
+            Code = result.ErrorCode ?? "revoke_failed",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = http.Connection.RemoteIpAddress?.ToString(),
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "revoke_failed"), statusCode: status);
     }
@@ -521,22 +1003,20 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
     {
     }
 
-    try
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
     {
-        await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-        {
-            Id = Guid.NewGuid(),
-            OccurredAt = DateTimeOffset.UtcNow,
-            TenantId = tenantId,
-            OurSubject = ourSubject,
-            SessionId = revokedSessionId,
-            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
-            Outcome = "success",
-        }, ct);
-    }
-    catch
-    {
-    }
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = tenantId,
+        OurSubject = ourSubject,
+        SessionId = revokedSessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
+        Outcome = "success",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = http.Connection.RemoteIpAddress?.ToString(),
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
 
     return Results.Json(ApiResponse<TokenRevokeResponse>.Ok(new TokenRevokeResponse(1)));
 }
@@ -592,45 +1072,47 @@ static async Task<IResult> OidcCallback(
     ISubjectRepository subjects,
     IAuthorizationDataStore authzData,
     ITokenService tokens,
-    IAuthEventStore events,
+    IMfaPolicyProvider mfaPolicy,
+    IMfaChallengeStore mfaChallenges,
+    IOptionsMonitor<MfaOptions> mfaOptions,
+    IAuditEventWriter audit,
     CancellationToken ct)
 {
+    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
     if (!string.IsNullOrWhiteSpace(error))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "oidc_error",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "oidc_error",
+            Detail = error,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("oidc_error", error), statusCode: StatusCodes.Status400BadRequest);
     }
 
     if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "invalid_request",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "invalid_request",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("invalid_request", "Missing code/state"), statusCode: StatusCodes.Status400BadRequest);
     }
@@ -638,20 +1120,18 @@ static async Task<IResult> OidcCallback(
     var ctx = await authState.ConsumeStateAsync(state, ct);
     if (ctx is null)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "invalid_state",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "invalid_state",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
     }
@@ -659,66 +1139,39 @@ static async Task<IResult> OidcCallback(
     var tenantDto = await tenants.FindAsync(ctx.TenantId, ct);
     if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = ctx.TenantId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "tenant_not_active",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "tenant_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
     }
 
-    try
+    var enabled = await oidc.IsTenantProviderEnabledAsync(ctx.TenantId, provider, ct);
+    if (!enabled)
     {
-        var enabled = await oidc.IsTenantProviderEnabledAsync(ctx.TenantId, provider, ct);
-        if (!enabled)
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            try
-            {
-                await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-                {
-                    Id = Guid.NewGuid(),
-                    OccurredAt = DateTimeOffset.UtcNow,
-                    TenantId = ctx.TenantId,
-                    Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                    Outcome = "fail",
-                    Detail = "provider_not_enabled",
-                }, ct);
-            }
-            catch
-            {
-            }
-
-            return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
-        }
-    }
-    catch (InvalidOperationException)
-    {
-        try
-        {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = ctx.TenantId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "provider_not_enabled",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "provider_not_enabled",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
     }
@@ -726,102 +1179,158 @@ static async Task<IResult> OidcCallback(
     OidcUserInfo userInfo;
     try
     {
-        userInfo = await oidc.ExchangeCodeAsync(
-            ctx.TenantId,
-            provider,
-            code,
-            ctx,
-            cancellationToken: ct);
+        userInfo = await oidc.ExchangeCodeAsync(ctx.TenantId, provider, code, ctx, cancellationToken: ct);
     }
-    catch (InvalidOperationException)
+    catch (Exception ex)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = ctx.TenantId,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "provider_not_enabled",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "oidc_exchange_failed",
+            Detail = ex.GetType().Name,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail("oidc_exchange_failed"), statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var key = new Birdsoft.Security.Abstractions.Identity.ExternalIdentityKey(
-        ctx.TenantId,
-        provider,
-        userInfo.Issuer,
-        userInfo.ProviderSub);
-
+    var key = new Birdsoft.Security.Abstractions.Identity.ExternalIdentityKey(ctx.TenantId, provider, userInfo.Issuer, userInfo.ProviderSub);
     var mapping = await externalStore.FindMappingAsync(key, ct);
 
     if (mapping is not null && !mapping.Enabled)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = ctx.TenantId,
-                OurSubject = mapping.OurSubject,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "external_identity_disabled",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            OurSubject = mapping.OurSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "external_identity_disabled",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("external_identity_disabled"), statusCode: StatusCodes.Status403Forbidden);
     }
 
-    var ourSubject = mapping?.OurSubject
-        ?? await provisioner.ProvisionAsync(ctx.TenantId, key, userInfo, ct);
+    var ourSubject = mapping?.OurSubject ?? await provisioner.ProvisionAsync(ctx.TenantId, key, userInfo, ct);
 
-    var subjectDto = await subjects.FindAsync(ctx.TenantId, ourSubject, ct)
-        ?? await subjects.CreateAsync(ctx.TenantId, ourSubject, ct);
+    var subjectDto = await subjects.FindAsync(ctx.TenantId, ourSubject, ct) ?? await subjects.CreateAsync(ctx.TenantId, ourSubject, ct);
     if (subjectDto.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
     {
-        try
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
-            await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-            {
-                Id = Guid.NewGuid(),
-                OccurredAt = DateTimeOffset.UtcNow,
-                TenantId = ctx.TenantId,
-                OurSubject = ourSubject,
-                Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
-                Outcome = "fail",
-                Detail = "user_not_active",
-            }, ct);
-        }
-        catch
-        {
-        }
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "user_not_active",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
 
         return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
     }
 
     if (mapping is null)
     {
-        _ = await externalStore.CreateMappingAsync(
-            new Birdsoft.Security.Abstractions.Identity.ExternalIdentityMapping(
-                ctx.TenantId,
-                ourSubject,
-                provider,
-                userInfo.Issuer,
-                userInfo.ProviderSub,
-                DateTimeOffset.UtcNow),
-            ct);
+        _ = await externalStore.CreateMappingAsync(new Birdsoft.Security.Abstractions.Identity.ExternalIdentityMapping(
+            ctx.TenantId,
+            ourSubject,
+            provider,
+            userInfo.Issuer,
+            userInfo.ProviderSub,
+            DateTimeOffset.UtcNow), ct);
+    }
+
+    var policy = await mfaPolicy.GetPolicyAsync(ctx.TenantId, ourSubject, ct);
+    var skipRequested = http.Request.Headers.TryGetValue("X-Mfa-Skip", out var skipHeader)
+        && string.Equals(skipHeader.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+
+    if (policy == MfaPolicy.Required)
+    {
+        try
+        {
+            var ch = await mfaChallenges.CreateAsync(ctx.TenantId, ourSubject, ttl: TimeSpan.FromMinutes(5), providerHint: "inmemory", cancellationToken: ct);
+            return Results.Json(ApiResponse<LoginResult>.Ok(new LoginResult(
+                Status: "mfa_required",
+                Tokens: null,
+                Mfa: new MfaChallengeResponse(ch.ChallengeId, ch.ExpiresAt, true, ch.ProviderHint))),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        catch (Exception ex)
+        {
+            if (mfaOptions.CurrentValue.AllowSkipOnProviderFailure)
+            {
+                await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredAt = DateTimeOffset.UtcNow,
+                    TenantId = ctx.TenantId,
+                    OurSubject = ourSubject,
+                    Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+                    Outcome = "skip",
+                    Code = "mfa_skipped_provider_failure",
+                    Detail = ex.GetType().Name,
+                    CorrelationId = http.GetCorrelationId(),
+                    TraceId = http.GetTraceId(),
+                    Ip = ip,
+                    UserAgent = http.Request.Headers.UserAgent.ToString(),
+                }, ct);
+            }
+            else
+            {
+                await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+                {
+                    Id = Guid.NewGuid(),
+                    OccurredAt = DateTimeOffset.UtcNow,
+                    TenantId = ctx.TenantId,
+                    OurSubject = ourSubject,
+                    Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+                    Outcome = "fail",
+                    Code = "mfa_unavailable",
+                    Detail = ex.GetType().Name,
+                    CorrelationId = http.GetCorrelationId(),
+                    TraceId = http.GetTraceId(),
+                    Ip = ip,
+                    UserAgent = http.Request.Headers.UserAgent.ToString(),
+                }, ct);
+                return Results.Json(ApiResponse<object>.Fail("mfa_unavailable"), statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+        }
+    }
+
+    if (policy == MfaPolicy.Optional && skipRequested)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            OurSubject = ourSubject,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
+            Outcome = "skip",
+            Code = "mfa_skipped",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
     }
 
     var roles = await authzData.GetRolesAsync(ctx.TenantId, ourSubject, ct);
@@ -842,49 +1351,82 @@ static async Task<IResult> OidcCallback(
     {
     }
 
-    try
+    await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
     {
-        await events.AppendAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
-        {
-            Id = Guid.NewGuid(),
-            OccurredAt = DateTimeOffset.UtcNow,
-            TenantId = ctx.TenantId,
-            OurSubject = ourSubject,
-            SessionId = sessionId,
-            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenIssued,
-            Outcome = "success",
-            Detail = $"oidc:{provider}",
-        }, ct);
-    }
-    catch
-    {
-    }
+        Id = Guid.NewGuid(),
+        OccurredAt = DateTimeOffset.UtcNow,
+        TenantId = ctx.TenantId,
+        OurSubject = ourSubject,
+        SessionId = sessionId,
+        Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenIssued,
+        Outcome = "success",
+        Code = $"oidc:{provider}",
+        CorrelationId = http.GetCorrelationId(),
+        TraceId = http.GetTraceId(),
+        Ip = ip,
+        UserAgent = http.Request.Headers.UserAgent.ToString(),
+    }, ct);
 
-    return Results.Json(ApiResponse<TokenPair>.Ok(pair));
+    return Results.Json(ApiResponse<LoginResult>.Ok(new LoginResult(Status: "success", Tokens: pair, Mfa: null)));
 }
 
-auth.MapPost("/password/login", PasswordLogin);
+auth.MapPost("/password/login", PasswordLogin)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
 
-auth.MapGet("/oidc/{provider}/challenge", OidcChallenge);
+auth.MapPost("/mfa/verify", MfaVerify)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa));
 
-auth.MapGet("/oidc/{provider}/callback", OidcCallback);
+auth.MapGet("/oidc/{provider}/challenge", OidcChallenge)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
 
-auth.MapPost("/token/refresh", TokenRefresh);
+auth.MapGet("/oidc/{provider}/callback", OidcCallback)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
+
+auth.MapPost("/token/refresh", TokenRefresh)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed));
 
 // Legacy alias: prefer POST /api/v1/auth/token/revoke
-auth.MapPost("/logout", TokenRevoke);
+auth.MapPost("/logout", TokenRevoke)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked));
 
-auth.MapPost("/token/revoke", TokenRevoke);
+auth.MapPost("/token/revoke", TokenRevoke)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked));
 
 // Legacy route mappings (temporary compatibility)
 var legacyAuth = app.MapGroup("/auth");
-legacyAuth.MapPost("/login", PasswordLogin);
-legacyAuth.MapPost("/refresh", TokenRefresh);
-legacyAuth.MapPost("/logout", TokenRevoke);
-legacyAuth.MapPost("/token/revoke", TokenRevoke);
-legacyAuth.MapGet("/oidc/{provider}/challenge", OidcChallenge);
-legacyAuth.MapGet("/oidc/{provider}/callback", OidcCallback);
+legacyAuth.MapPost("/login", PasswordLogin)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
+legacyAuth.MapPost("/mfa/verify", MfaVerify)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa));
+legacyAuth.MapPost("/refresh", TokenRefresh)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed));
+legacyAuth.MapPost("/logout", TokenRevoke)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked));
+legacyAuth.MapPost("/token/revoke", TokenRevoke)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked));
+legacyAuth.MapGet("/oidc/{provider}/challenge", OidcChallenge)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
+legacyAuth.MapGet("/oidc/{provider}/callback", OidcCallback)
+    .AddEndpointFilter(new RateLimitEndpointFilter("auth_sensitive", Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication));
 
 app.MapGet("/.well-known/jwks.json", (IJwtKeyProvider keys) => Results.Ok(keys.GetJwksDocument()));
+
+app.MapGet("/metrics", () => Results.Text(SecurityMetrics.ToPrometheusText(SecurityMetrics.Snapshot()), "text/plain"));
+
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    Predicate = _ => true,
+});
+
+app.MapHealthChecks("/ready", new HealthCheckOptions
+{
+    Predicate = r => r.Tags.Contains("ready"),
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable,
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+    }
+});
 
 app.Run();

@@ -123,12 +123,21 @@ public sealed class SecurityDbContext : DbContext
             b.ToTable("auth_events");
             b.HasKey(x => x.Id);
             b.Property(x => x.Outcome).HasMaxLength(64);
+            b.Property(x => x.Code).HasMaxLength(128);
             b.Property(x => x.Detail).HasMaxLength(2048);
+
+            b.Property(x => x.CorrelationId).HasMaxLength(64);
+            b.Property(x => x.TraceId).HasMaxLength(64);
+            b.Property(x => x.Ip).HasMaxLength(64);
+            b.Property(x => x.UserAgent).HasMaxLength(256);
+
             b.HasIndex(x => x.OccurredAt);
             b.HasIndex(x => x.TenantId);
             b.HasIndex(x => new { x.TenantId, x.OurSubject });
             b.HasIndex(x => x.SessionId);
             b.HasIndex(x => x.Type);
+            b.HasIndex(x => new { x.TenantId, x.OccurredAt });
+            b.HasIndex(x => new { x.TenantId, x.OurSubject, x.OccurredAt });
         });
 
         base.OnModelCreating(modelBuilder);
