@@ -16,8 +16,15 @@ public sealed class SimpleRbacAuthorizationEvaluator : IAuthorizationEvaluator
 
     public async ValueTask<AuthorizationDecision> EvaluateAsync(AuthorizationRequest request, CancellationToken cancellationToken = default)
     {
-        var scopes = await _store.GetScopesAsync(request.TenantId, request.OurSubject, cancellationToken);
         var required = $"{request.Resource}:{request.Action}";
+
+        var permissions = await _store.GetPermissionsAsync(request.TenantId, request.OurSubject, cancellationToken);
+        if (permissions.Contains(required, StringComparer.Ordinal))
+        {
+            return AuthorizationDecision.Allow("permission_match");
+        }
+
+        var scopes = await _store.GetScopesAsync(request.TenantId, request.OurSubject, cancellationToken);
 
         if (scopes.Contains(required, StringComparer.Ordinal))
         {

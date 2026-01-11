@@ -21,4 +21,13 @@ public interface IExternalIdentityRepository
         string issuer,
         string providerSub,
         CancellationToken cancellationToken = default);
+
+    Task<bool> DisableAsync(
+        Guid tenantId,
+        string provider,
+        string issuer,
+        string providerSub,
+        DateTimeOffset disabledAt,
+        string? reason = null,
+        CancellationToken cancellationToken = default);
 }

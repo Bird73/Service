@@ -18,6 +18,8 @@ public sealed class SecurityDbContext : DbContext
     public DbSet<LocalAccountEntity> LocalAccounts => Set<LocalAccountEntity>();
     public DbSet<AccessTokenDenylistEntity> AccessTokenDenylist => Set<AccessTokenDenylistEntity>();
     public DbSet<OidcProviderConfigEntity> OidcProviders => Set<OidcProviderConfigEntity>();
+    public DbSet<TokenSessionEntity> TokenSessions => Set<TokenSessionEntity>();
+    public DbSet<AuthEventEntity> AuthEvents => Set<AuthEventEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -50,6 +52,7 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.TokenHash).HasMaxLength(128);
             b.HasIndex(x => x.TokenHash).IsUnique();
             b.HasIndex(x => new { x.TenantId, x.OurSubject });
+            b.HasIndex(x => new { x.TenantId, x.SessionId });
             b.HasIndex(x => x.ExpiresAt);
             b.HasIndex(x => x.RevokedAt);
 
@@ -64,7 +67,10 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.Provider).HasMaxLength(64);
             b.Property(x => x.Issuer).HasMaxLength(512);
             b.Property(x => x.ProviderSub).HasMaxLength(256);
+            b.Property(x => x.DisabledReason).HasMaxLength(256);
             b.HasIndex(x => new { x.TenantId, x.Provider, x.Issuer, x.ProviderSub }).IsUnique();
+
+            b.HasIndex(x => new { x.TenantId, x.Enabled });
 
             // Ensure one subject isn't bound to multiple external identities within a tenant.
             b.HasIndex(x => new { x.TenantId, x.OurSubject }).IsUnique();
@@ -101,6 +107,28 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.CallbackPath).HasMaxLength(256);
             b.Property(x => x.ScopesJson).HasMaxLength(2048);
             b.HasIndex(x => x.Enabled);
+        });
+
+        modelBuilder.Entity<TokenSessionEntity>(b =>
+        {
+            b.ToTable("token_sessions");
+            b.HasKey(x => new { x.TenantId, x.SessionId });
+            b.Property(x => x.TerminationReason).HasMaxLength(256);
+            b.HasIndex(x => new { x.TenantId, x.OurSubject });
+            b.HasIndex(x => x.TerminatedAt);
+        });
+
+        modelBuilder.Entity<AuthEventEntity>(b =>
+        {
+            b.ToTable("auth_events");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Outcome).HasMaxLength(64);
+            b.Property(x => x.Detail).HasMaxLength(2048);
+            b.HasIndex(x => x.OccurredAt);
+            b.HasIndex(x => x.TenantId);
+            b.HasIndex(x => new { x.TenantId, x.OurSubject });
+            b.HasIndex(x => x.SessionId);
+            b.HasIndex(x => x.Type);
         });
 
         base.OnModelCreating(modelBuilder);

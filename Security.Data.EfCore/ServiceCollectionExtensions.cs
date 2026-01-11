@@ -30,6 +30,9 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IOidcProviderRegistry, EfOidcProviderRegistry>();
         services.AddScoped<IOidcProviderService, EfOidcProviderService>();
 
+        services.AddScoped<ISessionStore, EfSessionStore>();
+        services.AddScoped<IAuthEventStore, EfAuthEventStore>();
+
         return services;
     }
 }

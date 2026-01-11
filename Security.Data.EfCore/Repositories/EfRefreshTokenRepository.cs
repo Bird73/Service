@@ -14,6 +14,7 @@ public sealed class EfRefreshTokenRepository : IRefreshTokenRepository
     public async Task<RefreshTokenDto> CreateAsync(
         Guid tenantId,
         Guid ourSubject,
+        Guid sessionId,
         string tokenHash,
         DateTimeOffset expiresAt,
         int issuedTenantTokenVersion,
@@ -27,6 +28,7 @@ public sealed class EfRefreshTokenRepository : IRefreshTokenRepository
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             OurSubject = ourSubject,
+            SessionId = sessionId,
             TokenHash = tokenHash,
             CreatedAt = now,
             ExpiresAt = expiresAt,
@@ -92,6 +94,7 @@ public sealed class EfRefreshTokenRepository : IRefreshTokenRepository
             Id = entity.Id,
             TenantId = entity.TenantId,
             OurSubject = entity.OurSubject,
+            SessionId = entity.SessionId,
             TokenHash = entity.TokenHash,
             CreatedAt = entity.CreatedAt,
             ExpiresAt = entity.ExpiresAt,

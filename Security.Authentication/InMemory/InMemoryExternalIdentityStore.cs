@@ -33,4 +33,21 @@ public sealed class InMemoryExternalIdentityStore : IExternalIdentityStore
         _mappings[key] = mapping;
         return ValueTask.FromResult(mapping);
     }
+
+    public ValueTask<bool> DisableMappingAsync(ExternalIdentityKey key, DateTimeOffset disabledAt, string? reason = null, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        if (!_mappings.TryGetValue(key, out var mapping))
+        {
+            return ValueTask.FromResult(false);
+        }
+
+        if (!mapping.Enabled)
+        {
+            return ValueTask.FromResult(true);
+        }
+
+        _mappings[key] = mapping with { Enabled = false, DisabledAt = disabledAt, DisabledReason = reason };
+        return ValueTask.FromResult(true);
+    }
 }

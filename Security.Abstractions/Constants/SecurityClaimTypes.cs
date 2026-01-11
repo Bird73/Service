@@ -38,6 +38,9 @@ public static class SecurityClaimTypes
     /// <summary>JWT ID（jti）</summary>
     public const string Jti = "jti";
 
+    /// <summary>Session ID（可撤銷/強制登出用）</summary>
+    public const string SessionId = "session_id";
+
     /// <summary>租戶 Token Version（強制重新登入用）</summary>
     public const string TenantTokenVersion = "tenant_tv";
 

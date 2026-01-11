@@ -19,4 +19,12 @@ public sealed class InMemoryAuthorizationDataStore : IAuthorizationDataStore
         _ = cancellationToken;
         return ValueTask.FromResult<IReadOnlyList<string>>([]);
     }
+
+    public ValueTask<IReadOnlyList<string>> GetPermissionsAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken = default)
+    {
+        _ = tenantId;
+        _ = ourSubject;
+        _ = cancellationToken;
+        return ValueTask.FromResult<IReadOnlyList<string>>([]);
+    }
 }

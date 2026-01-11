@@ -22,6 +22,7 @@ public sealed class EfSubjectRepository : ISubjectRepository
             {
                 TenantId = entity.TenantId,
                 OurSubject = entity.OurSubject,
+                Status = (UserStatus)entity.Status,
                 TokenVersion = entity.TokenVersion,
                 CreatedAt = entity.CreatedAt,
             };
@@ -34,6 +35,7 @@ public sealed class EfSubjectRepository : ISubjectRepository
         {
             TenantId = tenantId,
             OurSubject = ourSubject,
+            Status = (int)UserStatus.Active,
             TokenVersion = 0,
             CreatedAt = now,
         };
@@ -45,6 +47,7 @@ public sealed class EfSubjectRepository : ISubjectRepository
         {
             TenantId = entity.TenantId,
             OurSubject = entity.OurSubject,
+            Status = (UserStatus)entity.Status,
             TokenVersion = entity.TokenVersion,
             CreatedAt = entity.CreatedAt,
         };
@@ -62,5 +65,12 @@ public sealed class EfSubjectRepository : ISubjectRepository
         return await _db.Subjects
             .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.TokenVersion, x => x.TokenVersion + 1), cancellationToken);
+    }
+
+    public async Task<int> UpdateStatusAsync(Guid tenantId, Guid ourSubject, UserStatus status, CancellationToken cancellationToken = default)
+    {
+        return await _db.Subjects
+            .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, (int)status), cancellationToken);
     }
 }

@@ -9,4 +9,7 @@ public sealed record ExternalIdentityMapping(
     string Provider,
     string Issuer,
     string ProviderSubject,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    bool Enabled = true,
+    DateTimeOffset? DisabledAt = null,
+    string? DisabledReason = null);

@@ -10,6 +10,7 @@ public interface IRefreshTokenRepository
     Task<RefreshTokenDto> CreateAsync(
         Guid tenantId,
         Guid ourSubject,
+        Guid sessionId,
         string tokenHash,
         DateTimeOffset expiresAt,
         int issuedTenantTokenVersion,

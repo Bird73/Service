@@ -14,6 +14,7 @@ Access Token 必須至少包含：
 - `jti`：JWT ID（可用於 denylist / 即時撤銷）
 - `sub`：本系統 subject（語意上等同 `our_subject`）
 - `tenant_id`：租戶 GUID
+- `session_id`：可撤銷 session id（GUID；用於即時撤銷/登出）
 
 對應 code 常數：`Security.Abstractions.Constants.SecurityJwtSpec`、`Security.Abstractions.Constants.SecurityClaimTypes`。
 
@@ -36,3 +37,4 @@ Access Token 必須至少包含：
 - `aud` 必須包含設定 audience
 - `exp/iat/nbf` 必須落在允許的時間窗（由 `JwtOptions.ClockSkewSeconds` 控制）
 - 若採即時撤銷：驗證端必須檢查 `jti` 是否在 denylist 或版本號是否匹配
+- 若 token 包含 `session_id`：驗證端應檢查 session 是否仍為 active（否則視為 `session_terminated`）

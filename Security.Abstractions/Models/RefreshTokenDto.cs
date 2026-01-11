@@ -5,6 +5,7 @@ public sealed record RefreshTokenDto
     public required System.Guid Id { get; init; }
     public required System.Guid TenantId { get; init; }
     public required System.Guid OurSubject { get; init; }
+    public required System.Guid SessionId { get; init; }
     public required string TokenHash { get; init; }
     public required System.DateTimeOffset CreatedAt { get; init; }
     public required System.DateTimeOffset ExpiresAt { get; init; }

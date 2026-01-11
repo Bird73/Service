@@ -9,11 +9,13 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.1" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.1" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Security.Abstractions\Security.Abstractions.csproj" />
     <ProjectReference Include="..\Security.Authorization\Security.Authorization.csproj" />
+    <ProjectReference Include="..\Security.Data.EfCore\Security.Data.EfCore.csproj" />
   </ItemGroup>
 
 </Project>

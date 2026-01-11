@@ -30,7 +30,10 @@ public sealed class ExternalIdentityStoreFromRepository : IExternalIdentityStore
                 dto.Provider,
                 dto.Issuer,
                 dto.ProviderSub,
-                CreatedAt: DateTimeOffset.UtcNow);
+                CreatedAt: DateTimeOffset.UtcNow,
+                Enabled: dto.Enabled,
+                DisabledAt: dto.DisabledAt,
+                DisabledReason: dto.DisabledReason);
     }
 
     public async ValueTask<ExternalIdentityMapping> CreateMappingAsync(ExternalIdentityMapping mapping, CancellationToken cancellationToken = default)
@@ -49,7 +52,10 @@ public sealed class ExternalIdentityStoreFromRepository : IExternalIdentityStore
             dto.Provider,
             dto.Issuer,
             dto.ProviderSub,
-            CreatedAt: DateTimeOffset.UtcNow);
+            CreatedAt: DateTimeOffset.UtcNow,
+            Enabled: dto.Enabled,
+            DisabledAt: dto.DisabledAt,
+            DisabledReason: dto.DisabledReason);
     }
 
     public async ValueTask<ExternalIdentityMapping> UpsertMappingAsync(ExternalIdentityMapping mapping, CancellationToken cancellationToken = default)
@@ -59,5 +65,10 @@ public sealed class ExternalIdentityStoreFromRepository : IExternalIdentityStore
             cancellationToken);
 
         return existing ?? await CreateMappingAsync(mapping, cancellationToken);
+    }
+
+    public async ValueTask<bool> DisableMappingAsync(ExternalIdentityKey key, DateTimeOffset disabledAt, string? reason = null, CancellationToken cancellationToken = default)
+    {
+        return await _repo.DisableAsync(key.TenantId, key.Provider, key.Issuer, key.ProviderSubject, disabledAt, reason, cancellationToken);
     }
 }

@@ -19,4 +19,9 @@ public interface ITenantRepository
     Task<int> IncrementTokenVersionAsync(
         Guid tenantId,
         CancellationToken cancellationToken = default);
+
+    Task<int> UpdateStatusAsync(
+        Guid tenantId,
+        TenantStatus status,
+        CancellationToken cancellationToken = default);
 }

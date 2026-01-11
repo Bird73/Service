@@ -47,12 +47,39 @@ public sealed class EfExternalIdentityRepository : IExternalIdentityRepository
             Issuer = issuer,
             ProviderSub = providerSub,
             CreatedAt = now,
+            Enabled = true,
+            DisabledAt = null,
+            DisabledReason = null,
         };
 
         _db.ExternalIdentities.Add(entity);
         await _db.SaveChangesAsync(cancellationToken);
 
         return ToDto(entity);
+    }
+
+    public async Task<bool> DisableAsync(
+        Guid tenantId,
+        string provider,
+        string issuer,
+        string providerSub,
+        DateTimeOffset disabledAt,
+        string? reason = null,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _db.ExternalIdentities
+            .Where(x => x.TenantId == tenantId
+                        && x.Provider == provider
+                        && x.Issuer == issuer
+                        && x.ProviderSub == providerSub
+                        && x.Enabled)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.Enabled, false)
+                .SetProperty(x => x.DisabledAt, disabledAt)
+                .SetProperty(x => x.DisabledReason, reason),
+                cancellationToken);
+
+        return affected == 1;
     }
 
     private static ExternalIdentityDto ToDto(ExternalIdentityEntity entity)
@@ -63,5 +90,8 @@ public sealed class EfExternalIdentityRepository : IExternalIdentityRepository
             Provider = entity.Provider,
             Issuer = entity.Issuer,
             ProviderSub = entity.ProviderSub,
+            Enabled = entity.Enabled,
+            DisabledAt = entity.DisabledAt,
+            DisabledReason = entity.DisabledReason,
         };
 }

@@ -14,4 +14,13 @@ public interface IAuthorizationDataStore
         Guid tenantId,
         Guid ourSubject,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Fine-grained permissions (separate from roles).
+    /// Typical format: <c>resource:action</c>.
+    /// </summary>
+    ValueTask<IReadOnlyList<string>> GetPermissionsAsync(
+        Guid tenantId,
+        Guid ourSubject,
+        CancellationToken cancellationToken = default);
 }

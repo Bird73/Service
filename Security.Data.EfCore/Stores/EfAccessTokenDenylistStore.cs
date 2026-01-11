@@ -34,7 +34,9 @@ public sealed class EfAccessTokenDenylistStore : IAccessTokenDenylistStore
     public async Task<bool> ContainsAsync(Guid tenantId, string jti, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
-        return await _db.AccessTokenDenylist.AsNoTracking()
-            .AnyAsync(x => x.TenantId == tenantId && x.Jti == jti && x.ExpiresAt > now, cancellationToken);
+        var entity = await _db.AccessTokenDenylist.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.TenantId == tenantId && x.Jti == jti, cancellationToken);
+
+        return entity is not null && entity.ExpiresAt > now;
     }
 }

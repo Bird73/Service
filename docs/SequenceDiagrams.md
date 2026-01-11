@@ -38,8 +38,9 @@ sequenceDiagram
         else Password valid
             LA-->>AS: our_subject
             AS->>TS: GenerateTokensAsync(tenant_id, our_subject)
-            TS->>DB: INSERT RefreshToken (hash)
-            TS-->>AS: TokenPair {access_token, refresh_token, expires_in}
+            note over TS: 會建立新的 session_id，並寫入 RefreshToken.session_id
+            TS->>DB: INSERT TokenSession + RefreshToken (hash, session_id)
+            TS-->>AS: TokenPair {access_token (含 session_id), refresh_token, expires_in}
             AS-->>API: AuthResult.Success(TokenPair)
             API-->>C: 200 OK {access_token, refresh_token, expires_in}
         end
@@ -123,7 +124,7 @@ sequenceDiagram
     participant DB as Database
 
     P->>B: Redirect back with code + state
-    B->>API: GET /api/auth/oidc/{provider}/callback?state=xxx&code=yyy
+    B->>API: GET /api/v1/auth/oidc/{provider}/callback?state=xxx&code=yyy
     API->>SS: ConsumeStateAsync(state)
     SS->>DB: UPDATE AuthState SET used_at=now WHERE state=xxx AND used_at IS NULL
     DB-->>SS: affected rows
@@ -156,7 +157,7 @@ sequenceDiagram
         end
 
         API->>TS: GenerateTokensAsync(tenant_id, our_subject)
-        TS->>DB: INSERT RefreshToken (hash)
+        TS->>DB: INSERT TokenSession + RefreshToken (hash, session_id)
         TS-->>API: TokenPair
         note over API,B: 實務上 callback 通常以 redirect 回前端（或寫入 HttpOnly cookie）
         API-->>B: 302 Redirect to SPA callback (攜帶 tokens 或 session cookie)
@@ -235,6 +236,7 @@ sequenceDiagram
     TS->>DB: UPDATE RefreshToken SET revoked_at=now WHERE token_hash=xxx AND tenant_id=? AND our_subject=?
     DB-->>TS: affected rows
     TS-->>API: RevokeResult.Success
+    note over TS: 同時終止 session；後續 access/refresh 會因 session_terminated 失效
     API-->>C: 200 OK
 
 ```

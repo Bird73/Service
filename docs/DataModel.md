@@ -7,11 +7,13 @@
 ### Tenants
 - `tenant_id` (PK, GUID)
 - `name`
+- `status`（Active/Suspended/Archived）
 - `token_version`（tenant 強制重新登入用）
 - `created_at`
 
 ### Subjects
 - `(tenant_id, our_subject)` (PK composite)
+- `status`（Active/Disabled/Locked）
 - `token_version`（subject 強制重新登入用）
 - `created_at`
 
@@ -34,6 +36,9 @@
 - `provider`（line/ms/google…）
 - `issuer`
 - `provider_sub`
+- `enabled`（bool）
+- `disabled_at`（nullable）
+- `disabled_reason`（nullable）
 - `created_at`
 
 索引/唯一（關鍵）：
@@ -73,6 +78,7 @@
 - `id` (PK)
 - `tenant_id`
 - `our_subject`
+- `session_id`（綁定 access token 的 session）
 - `token_hash`
 - `created_at`
 - `expires_at`
@@ -82,7 +88,38 @@
 
 索引：
 - UNIQUE `(token_hash)`
+- INDEX `(tenant_id, session_id)`
 - INDEX `(tenant_id, our_subject, revoked_at, expires_at)`
+
+### TokenSessions（可撤銷 session）
+
+- `(tenant_id, session_id)` (PK composite)
+- `our_subject`
+- `created_at`
+- `terminated_at`（nullable）
+- `termination_reason`（nullable）
+
+索引：
+- INDEX `(tenant_id, our_subject)`
+- INDEX `(terminated_at)`
+
+### AuthEvents（稽核事件）
+
+- `id` (PK)
+- `occurred_at`
+- `tenant_id`（nullable）
+- `our_subject`（nullable）
+- `session_id`（nullable）
+- `type`（int enum）
+- `outcome`（string）
+- `detail`（nullable string）
+
+索引：
+- INDEX `(occurred_at)`
+- INDEX `(tenant_id)`
+- INDEX `(tenant_id, our_subject)`
+- INDEX `(session_id)`
+- INDEX `(type)`
 
 ## 2. 授權（Role/Permission）
 

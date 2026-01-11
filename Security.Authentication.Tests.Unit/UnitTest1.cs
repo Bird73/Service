@@ -103,7 +103,8 @@ public sealed class OidcFlowSkeletonTests
 
         IOptionsMonitor<JwtOptions> monitor = new FakeOptionsMonitor<JwtOptions>(jwt);
         var keys = new Birdsoft.Security.Authentication.Jwt.DefaultJwtKeyProvider(monitor);
-        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, keys);
+        var sessions = new Birdsoft.Security.Authentication.InMemorySessionStore();
+        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, keys, sessions);
         var authState = new Birdsoft.Security.Authentication.InMemoryAuthStateService();
         var oidc = new Birdsoft.Security.Authentication.InMemoryOidcProviderService();
         var external = new Birdsoft.Security.Authentication.InMemoryExternalIdentityStore();

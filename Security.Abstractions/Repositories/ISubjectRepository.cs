@@ -27,4 +27,10 @@ public interface ISubjectRepository
         Guid tenantId,
         Guid ourSubject,
         CancellationToken cancellationToken = default);
+
+    Task<int> UpdateStatusAsync(
+        Guid tenantId,
+        Guid ourSubject,
+        UserStatus status,
+        CancellationToken cancellationToken = default);
 }

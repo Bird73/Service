@@ -5,6 +5,7 @@ using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
+using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authentication.Jwt;
 using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
@@ -19,6 +20,7 @@ public sealed class RepositoryTokenService : ITokenService
     private readonly ISubjectRepository _subjects;
     private readonly IRefreshTokenRepository _refresh;
     private readonly IAccessTokenDenylistStore _denylist;
+    private readonly ISessionStore _sessions;
 
     public RepositoryTokenService(
         IOptionsMonitor<JwtOptions> jwtOptions,
@@ -26,7 +28,8 @@ public sealed class RepositoryTokenService : ITokenService
         ITenantRepository tenants,
         ISubjectRepository subjects,
         IRefreshTokenRepository refresh,
-        IAccessTokenDenylistStore denylist)
+        IAccessTokenDenylistStore denylist,
+        ISessionStore sessions)
     {
         _jwtOptions = jwtOptions;
         _keys = keys;
@@ -34,6 +37,7 @@ public sealed class RepositoryTokenService : ITokenService
         _subjects = subjects;
         _refresh = refresh;
         _denylist = denylist;
+        _sessions = sessions;
     }
 
     public async Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
@@ -113,21 +117,47 @@ public sealed class RepositoryTokenService : ITokenService
             return AccessTokenValidationResult.Fail("revoked_token");
         }
 
+        if (TryGetString(root, SecurityClaimTypes.SessionId, out var sessionRaw)
+            && Guid.TryParse(sessionRaw, out var sessionId))
+        {
+            var active = await _sessions.IsSessionActiveAsync(tenantId, sessionId, cancellationToken);
+            if (!active)
+            {
+                return AccessTokenValidationResult.Fail("session_terminated");
+            }
+        }
+
+        var tenant = await _tenants.FindAsync(tenantId, cancellationToken);
+        if (tenant is null)
+        {
+            return AccessTokenValidationResult.Fail("invalid_tenant");
+        }
+
+        if (tenant.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
+        {
+            return AccessTokenValidationResult.Fail(tenant.Status == Birdsoft.Security.Abstractions.Models.TenantStatus.Archived ? "tenant_archived" : "tenant_suspended");
+        }
+
+        var subject = await _subjects.FindAsync(tenantId, ourSubject, cancellationToken);
+        if (subject is null)
+        {
+            return AccessTokenValidationResult.Fail("invalid_subject");
+        }
+
+        if (subject.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
+        {
+            return AccessTokenValidationResult.Fail(subject.Status == Birdsoft.Security.Abstractions.Models.UserStatus.Locked ? "user_locked" : "user_disabled");
+        }
+
         var tokenTenantTv = TryGetInt(root, SecurityClaimTypes.TenantTokenVersion);
         var tokenSubjectTv = TryGetInt(root, SecurityClaimTypes.SubjectTokenVersion);
 
-        if (tokenTenantTv is not null || tokenSubjectTv is not null)
+        var currentTenantTv = tenant.TokenVersion;
+        var currentSubjectTv = subject.TokenVersion;
+
+        if ((tokenTenantTv ?? 0) != currentTenantTv || (tokenSubjectTv ?? 0) != currentSubjectTv)
         {
-            var tenant = await _tenants.FindAsync(tenantId, cancellationToken);
-            var subject = await _subjects.FindAsync(tenantId, ourSubject, cancellationToken);
-
-            var currentTenantTv = tenant?.TokenVersion ?? 0;
-            var currentSubjectTv = subject?.TokenVersion ?? 0;
-
-            if ((tokenTenantTv ?? 0) != currentTenantTv || (tokenSubjectTv ?? 0) != currentSubjectTv)
-            {
-                return AccessTokenValidationResult.Fail("invalid_token_version");
-            }
+            return AccessTokenValidationResult.Fail("invalid_token_version");
         }
 
         return AccessTokenValidationResult.Success(tenantId, ourSubject, jti);
@@ -151,8 +181,9 @@ public sealed class RepositoryTokenService : ITokenService
         var subject = await _subjects.FindAsync(tenantId, ourSubject, cancellationToken)
             ?? await _subjects.CreateAsync(tenantId, ourSubject, cancellationToken);
 
+        var sessionId = await _sessions.CreateSessionAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken);
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, tenant.TokenVersion, subject.TokenVersion, roles, scopes);
+        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, tenant.TokenVersion, subject.TokenVersion, roles, scopes);
 
         var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
         var refreshExpires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, opts.RefreshTokenDays));
@@ -160,6 +191,7 @@ public sealed class RepositoryTokenService : ITokenService
         _ = await _refresh.CreateAsync(
             tenantId,
             ourSubject,
+            sessionId,
             refreshHash,
             refreshExpires,
             issuedTenantTokenVersion: tenant.TokenVersion,
@@ -194,10 +226,41 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail(dto.RevokedAt is not null ? "revoked_refresh_token" : "expired_refresh_token");
         }
 
+        var sessionActive = await _sessions.IsSessionActiveAsync(dto.TenantId, dto.SessionId, cancellationToken);
+        if (!sessionActive)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            return RefreshResult.Fail("session_terminated");
+        }
+
         var tenant = await _tenants.FindAsync(dto.TenantId, cancellationToken);
         var subject = await _subjects.FindAsync(dto.TenantId, dto.OurSubject, cancellationToken);
-        var currentTenantTv = tenant?.TokenVersion ?? 0;
-        var currentSubjectTv = subject?.TokenVersion ?? 0;
+        if (tenant is null)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            return RefreshResult.Fail("invalid_tenant");
+        }
+
+        if (tenant.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            return RefreshResult.Fail(tenant.Status == Birdsoft.Security.Abstractions.Models.TenantStatus.Archived ? "tenant_archived" : "tenant_suspended");
+        }
+
+        if (subject is null)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            return RefreshResult.Fail("invalid_subject");
+        }
+
+        if (subject.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            return RefreshResult.Fail(subject.Status == Birdsoft.Security.Abstractions.Models.UserStatus.Locked ? "user_locked" : "user_disabled");
+        }
+
+        var currentTenantTv = tenant.TokenVersion;
+        var currentSubjectTv = subject.TokenVersion;
 
         if (dto.IssuedTenantTokenVersion != currentTenantTv || dto.IssuedSubjectTokenVersion != currentSubjectTv)
         {
@@ -212,6 +275,7 @@ public sealed class RepositoryTokenService : ITokenService
         var newDto = await _refresh.CreateAsync(
             dto.TenantId,
             dto.OurSubject,
+            dto.SessionId,
             newHash,
             dto.ExpiresAt,
             issuedTenantTokenVersion: currentTenantTv,
@@ -221,7 +285,7 @@ public sealed class RepositoryTokenService : ITokenService
         _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, replacedByTokenId: newDto.Id, cancellationToken: cancellationToken);
 
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, currentTenantTv, currentSubjectTv, roles: null, scopes: null);
+        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, dto.SessionId, currentTenantTv, currentSubjectTv, roles: null, scopes: null);
 
         return RefreshResult.Success(new TokenPair
         {
@@ -251,17 +315,25 @@ public sealed class RepositoryTokenService : ITokenService
         }
 
         var ok = await _refresh.RevokeAsync(tenantId, ourSubject, tokenHash, DateTimeOffset.UtcNow, cancellationToken: cancellationToken);
+        _ = await _sessions.TerminateSessionAsync(tenantId, dto.SessionId, DateTimeOffset.UtcNow, reason: "refresh_revoke", cancellationToken);
         return ok ? RevokeResult.Success() : RevokeResult.Fail("revoke_failed");
     }
 
     public Task<int> RevokeAllAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken = default)
-        => _refresh.RevokeAllBySubjectAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken);
+        => RevokeAllCoreAsync(tenantId, ourSubject, cancellationToken);
+
+    private async Task<int> RevokeAllCoreAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken)
+    {
+        _ = await _sessions.TerminateAllAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, reason: "revoke_all", cancellationToken);
+        return await _refresh.RevokeAllBySubjectAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken);
+    }
 
     private string CreateAccessToken(
         JwtOptions opts,
         Guid tenantId,
         Guid ourSubject,
         string jti,
+        Guid sessionId,
         int tenantTokenVersion,
         int subjectTokenVersion,
         IReadOnlyList<string>? roles,
@@ -288,6 +360,7 @@ public sealed class RepositoryTokenService : ITokenService
             ["iat"] = now.ToUnixTimeSeconds(),
             ["nbf"] = now.ToUnixTimeSeconds(),
             [SecurityClaimTypes.Jti] = jti,
+            [SecurityClaimTypes.SessionId] = sessionId.ToString(),
             ["sub"] = ourSubject.ToString(),
             [SecurityClaimTypes.TenantId] = tenantId.ToString(),
             [SecurityClaimTypes.OurSubject] = ourSubject.ToString(),

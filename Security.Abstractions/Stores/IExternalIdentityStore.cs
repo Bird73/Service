@@ -19,4 +19,10 @@ public interface IExternalIdentityStore
     ValueTask<ExternalIdentityMapping> UpsertMappingAsync(
         ExternalIdentityMapping mapping,
         CancellationToken cancellationToken = default);
+
+    ValueTask<bool> DisableMappingAsync(
+        ExternalIdentityKey key,
+        DateTimeOffset disabledAt,
+        string? reason = null,
+        CancellationToken cancellationToken = default);
 }

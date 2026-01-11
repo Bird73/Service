@@ -9,4 +9,7 @@ public sealed class ExternalIdentityEntity
     public string Issuer { get; set; } = string.Empty;
     public string ProviderSub { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
+    public bool Enabled { get; set; }
+    public DateTimeOffset? DisabledAt { get; set; }
+    public string? DisabledReason { get; set; }
 }
