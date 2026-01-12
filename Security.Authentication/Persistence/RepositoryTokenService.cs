@@ -311,7 +311,7 @@ public sealed class RepositoryTokenService : ITokenService
         if (dto.IssuedTenantTokenVersion != currentTenantTv || dto.IssuedSubjectTokenVersion != currentSubjectTv)
         {
             _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
-            return RefreshResult.Fail("revoked_refresh_token");
+            return RefreshResult.Fail("invalid_token_version");
         }
 
         // rotation: create new refresh, revoke old with replacedBy

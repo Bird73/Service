@@ -294,7 +294,7 @@ static async Task<IResult> PasswordLogin(
     }
 
     var tenantDto = await tenants.FindAsync(tenant.TenantId, ct);
-    if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
+    if (tenantDto is null || tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
     {
         await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
@@ -1455,3 +1455,5 @@ app.MapHealthChecks("/ready", new HealthCheckOptions
 });
 
 app.Run();
+
+public partial class Program { }
