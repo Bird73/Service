@@ -19,17 +19,39 @@ using Birdsoft.Security.Authentication.Mfa;
 using Birdsoft.Security.Authentication.Observability.Health;
 using Birdsoft.Security.Authentication.Persistence;
 using Birdsoft.Security.Authentication.Tenancy;
+using Birdsoft.Security.Authentication.Observability.Logging;
 using Birdsoft.Security.Data.EfCore;
+using Birdsoft.Infrastructure.Logging.Abstractions;
+using Birdsoft.Infrastructure.Logging.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using System.IdentityModel.Tokens.Jwt;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
+
+// Error log (jsonl): auth-error-yyyyMMdd.jsonl
+builder.Services.AddBirdsoftJsonLogging(o =>
+{
+    o.RootDirectory = "logs";
+    o.RetentionDays = 30;
+});
+builder.Services.Replace(ServiceDescriptor.Singleton<ILogFilePathProvider>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<JsonLoggingOptions>>().Value;
+    var root = options.RootDirectory;
+    if (!Path.IsPathRooted(root))
+    {
+        root = Path.Combine(AppContext.BaseDirectory, root);
+    }
+
+    return new AuthErrorLogFilePathProvider(root);
+}));
 
 builder.Services.AddOptions<JwtOptions>()
     .Bind(builder.Configuration.GetSection(JwtOptions.SectionName));
@@ -192,6 +214,9 @@ if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+// Centralized unhandled-exception handler -> error log.
+app.UseMiddleware<AuthErrorLoggingMiddleware>();
 
 app.UseHttpsRedirection();
 app.UseMiddleware<CorrelationIdMiddleware>();

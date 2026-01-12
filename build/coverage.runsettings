@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <!-- Required excludes -->
+          <Exclude>[*.Tests.*]*</Exclude>
+          <!-- ExcludeByFile supports semicolon-separated globs. -->
+          <ExcludeByFile>**/*Tests*.cs;**/Program.cs;**/*Dto.cs;**/*DTO.cs;**/*Request.cs;**/*Response.cs;**/*Options.cs</ExcludeByFile>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

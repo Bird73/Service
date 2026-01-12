@@ -1,6 +1,8 @@
 namespace Birdsoft.Security.Authentication.Tenancy;
 
 using Birdsoft.Security.Abstractions.Tenancy;
+using Birdsoft.Security.Abstractions.Contracts.Common;
+using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
 
 public sealed class TenantResolutionMiddleware : IMiddleware
@@ -35,9 +37,48 @@ public sealed class TenantResolutionMiddleware : IMiddleware
         {
             _accessor.Current = tenant;
             context.SetTenantContext(tenant);
+            await next(context);
+            return;
+        }
+
+        // For auth endpoints, tenant is required (header or token claim). Missing tenant must not become 500.
+        if (RequiresTenant(context.Request.Path))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsJsonAsync(ApiResponse<object>.Fail("invalid_request", "X-Tenant-Id (or tenant_id claim) is required"));
+            return;
         }
 
         await next(context);
+    }
+
+    private static bool RequiresTenant(PathString path)
+    {
+        if (!path.HasValue)
+        {
+            return false;
+        }
+
+        var p = path.Value ?? string.Empty;
+        if (p.Length == 0)
+        {
+            return false;
+        }
+
+        // Only auth endpoints require tenant resolution.
+        if (p.StartsWith("/api/v1/auth", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Legacy root group.
+        if (p.StartsWith("/auth", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private static bool IsOidcCallback(PathString path)

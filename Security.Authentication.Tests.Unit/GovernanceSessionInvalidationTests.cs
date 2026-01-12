@@ -103,6 +103,111 @@ public sealed class GovernanceSessionInvalidationTests
         Assert.Equal("session_terminated", refreshed.ErrorCode);
     }
 
+    [Fact]
+    public async Task ValidateAccessToken_Fails_When_Jti_Is_Denylisted()
+    {
+        await using var env = await CreateEfEnvironmentAsync();
+        using var scope = env.Services.CreateScope();
+
+        var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+        var denylist = scope.ServiceProvider.GetRequiredService<IAccessTokenDenylistStore>();
+
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
+        var jti = ReadStringClaimFromJwt(pair.AccessToken, Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Jti);
+        Assert.False(string.IsNullOrWhiteSpace(jti));
+
+        var exp = ReadLongClaimFromJwt(pair.AccessToken, "exp");
+        Assert.NotNull(exp);
+        await denylist.AddAsync(tenantId, jti!, DateTimeOffset.FromUnixTimeSeconds(exp!.Value));
+
+        var validation = await tokens.ValidateAccessTokenAsync(pair.AccessToken);
+        Assert.False(validation.Succeeded);
+        Assert.Equal("revoked_token", validation.ErrorCode);
+    }
+
+    [Fact]
+    public async Task ValidateAccessToken_Fails_When_Tenant_TokenVersion_Bumped()
+    {
+        await using var env = await CreateEfEnvironmentAsync();
+        using var scope = env.Services.CreateScope();
+
+        var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+        var tenants = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
+        _ = await tenants.IncrementTokenVersionAsync(tenantId);
+
+        var validation = await tokens.ValidateAccessTokenAsync(pair.AccessToken);
+        Assert.False(validation.Succeeded);
+        Assert.Equal("invalid_token_version", validation.ErrorCode);
+    }
+
+    [Fact]
+    public async Task ValidateAccessToken_Fails_When_Subject_TokenVersion_Bumped()
+    {
+        await using var env = await CreateEfEnvironmentAsync();
+        using var scope = env.Services.CreateScope();
+
+        var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+        var subjects = scope.ServiceProvider.GetRequiredService<ISubjectRepository>();
+
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
+        _ = await subjects.IncrementTokenVersionAsync(tenantId, ourSubject);
+
+        var validation = await tokens.ValidateAccessTokenAsync(pair.AccessToken);
+        Assert.False(validation.Succeeded);
+        Assert.Equal("invalid_token_version", validation.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Refresh_Fails_When_Tenant_Suspended()
+    {
+        await using var env = await CreateEfEnvironmentAsync();
+        using var scope = env.Services.CreateScope();
+
+        var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+        var tenants = scope.ServiceProvider.GetRequiredService<ITenantRepository>();
+
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
+        _ = await tenants.UpdateStatusAsync(tenantId, TenantStatus.Suspended);
+
+        var refreshed = await tokens.RefreshAsync(pair.RefreshToken);
+        Assert.False(refreshed.Succeeded);
+        Assert.Equal("tenant_suspended", refreshed.ErrorCode);
+    }
+
+    [Fact]
+    public async Task Refresh_Fails_When_User_Disabled()
+    {
+        await using var env = await CreateEfEnvironmentAsync();
+        using var scope = env.Services.CreateScope();
+
+        var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+        var subjects = scope.ServiceProvider.GetRequiredService<ISubjectRepository>();
+
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
+        _ = await subjects.UpdateStatusAsync(tenantId, ourSubject, UserStatus.Disabled);
+
+        var refreshed = await tokens.RefreshAsync(pair.RefreshToken);
+        Assert.False(refreshed.Succeeded);
+        Assert.Equal("user_disabled", refreshed.ErrorCode);
+    }
+
     private static Guid? ReadGuidClaimFromJwt(string jwt, string claimType)
     {
         var parts = jwt.Split('.');
@@ -124,6 +229,41 @@ public sealed class GovernanceSessionInvalidationTests
         }
 
         return Guid.TryParse(value, out var guid) ? guid : null;
+    }
+
+    private static string? ReadStringClaimFromJwt(string jwt, string claimType)
+    {
+        var parts = jwt.Split('.');
+        Assert.True(parts.Length == 3);
+
+        var json = Encoding.UTF8.GetString(DecodeBase64Url(parts[1]));
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty(claimType, out var prop))
+        {
+            return null;
+        }
+
+        var value = prop.GetString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static long? ReadLongClaimFromJwt(string jwt, string claimType)
+    {
+        var parts = jwt.Split('.');
+        Assert.True(parts.Length == 3);
+
+        var json = Encoding.UTF8.GetString(DecodeBase64Url(parts[1]));
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        if (!root.TryGetProperty(claimType, out var prop) || prop.ValueKind != JsonValueKind.Number)
+        {
+            return null;
+        }
+
+        return prop.TryGetInt64(out var v) ? v : null;
     }
 
     private static byte[] DecodeBase64Url(string input)

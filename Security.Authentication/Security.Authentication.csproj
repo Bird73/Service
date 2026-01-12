@@ -15,6 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Security.Abstractions\Security.Abstractions.csproj" />
     <ProjectReference Include="..\Security.Data.EfCore\Security.Data.EfCore.csproj" />
+    <ProjectReference Include="..\..\Infrastructure\Birdsoft.Infrastructure.Logging.Json\Birdsoft.Infrastructure.Logging.Json.csproj" />
   </ItemGroup>
 
 </Project>

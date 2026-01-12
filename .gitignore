@@ -4,3 +4,6 @@ obj/
 *.user
 *.suo
 *.userprefs
+
+# Coverage / test artifacts
+artifacts/
