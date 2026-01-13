@@ -24,6 +24,7 @@ public interface IAuthStateRepository
     /// </summary>
     Task<bool> TryAttachOidcContextAsync(
         string state,
+        string provider,
         string codeVerifier,
         string nonce,
         CancellationToken cancellationToken = default);

@@ -11,6 +11,8 @@ public static class AuthErrorCodes
     public const string TenantNotActive = "tenant_not_active";
     public const string UserNotActive = "user_not_active";
     public const string InvalidState = "invalid_state";
+    public const string InvalidNonce = "invalid_nonce";
+    public const string InvalidPkce = "invalid_pkce";
     public const string StateExpired = "state_expired";
     public const string ProviderNotEnabled = "provider_not_enabled";
     public const string InvalidToken = "invalid_token";

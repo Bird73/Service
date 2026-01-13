@@ -60,13 +60,58 @@ public sealed class EfOidcProviderService : IOidcProviderService
             throw new InvalidOperationException("OIDC provider not enabled for this tenant.");
         }
 
+        // MVP stub: allow tests to trigger nonce/pkce mismatch deterministically.
+        // Format: "sub=<value>;n=<expectedNonce>;cv=<expectedCodeVerifier>" (any subset).
+        var expectedNonce = TryGetParam(code, "n");
+        var expectedCv = TryGetParam(code, "cv");
+        var sub = TryGetParam(code, "sub") ?? code;
+
+        if (!string.IsNullOrWhiteSpace(expectedNonce)
+            && !string.Equals(expectedNonce, ctx.Nonce, StringComparison.Ordinal))
+        {
+            throw new OidcNonceMismatchException();
+        }
+
+        if (!string.IsNullOrWhiteSpace(expectedCv)
+            && !string.Equals(expectedCv, ctx.CodeVerifier, StringComparison.Ordinal))
+        {
+            throw new OidcPkceMismatchException();
+        }
+
         // Stub: map code to provider_sub; issuer uses configured issuer if present.
         return new OidcUserInfo
         {
             Issuer = opts.Issuer ?? opts.Authority ?? "https://example.invalid",
-            ProviderSub = code,
+            ProviderSub = sub,
             Email = "stub@example.invalid",
             Name = "Stub User",
         };
+    }
+
+    private static string? TryGetParam(string input, string key)
+    {
+        if (string.IsNullOrWhiteSpace(input) || string.IsNullOrWhiteSpace(key))
+        {
+            return null;
+        }
+
+        var parts = input.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var part in parts)
+        {
+            var idx = part.IndexOf('=');
+            if (idx <= 0)
+            {
+                continue;
+            }
+
+            var k = part[..idx];
+            var v = part[(idx + 1)..];
+            if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return v;
+            }
+        }
+
+        return null;
     }
 }

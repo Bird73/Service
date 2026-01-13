@@ -41,6 +41,7 @@ public sealed class SecurityDbContext : DbContext
             b.ToTable("auth_states");
             b.HasKey(x => x.State);
             b.Property(x => x.State).HasMaxLength(200);
+            b.Property(x => x.Provider).HasMaxLength(64);
             b.HasIndex(x => x.ExpiresAt);
             b.HasIndex(x => x.UsedAt);
         });

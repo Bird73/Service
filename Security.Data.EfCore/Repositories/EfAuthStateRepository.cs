@@ -20,6 +20,7 @@ public sealed class EfAuthStateRepository : IAuthStateRepository
             CreatedAt = DateTimeOffset.UtcNow,
             ExpiresAt = expiresAt,
             UsedAt = null,
+            Provider = null,
             CodeVerifier = null,
             Nonce = null,
         };
@@ -36,17 +37,18 @@ public sealed class EfAuthStateRepository : IAuthStateRepository
         return entity is null ? null : ToDto(entity);
     }
 
-    public async Task<bool> TryAttachOidcContextAsync(string state, string codeVerifier, string nonce, CancellationToken cancellationToken = default)
+    public async Task<bool> TryAttachOidcContextAsync(string state, string provider, string codeVerifier, string nonce, CancellationToken cancellationToken = default)
     {
         var now = DateTimeOffset.UtcNow;
 
         // Use raw SQL for an atomic update that works across providers.
         var affected = await _db.Database.ExecuteSqlInterpolatedAsync(
             $@"UPDATE auth_states
-SET CodeVerifier = {codeVerifier}, Nonce = {nonce}
+SET Provider = {provider}, CodeVerifier = {codeVerifier}, Nonce = {nonce}
 WHERE State = {state}
   AND UsedAt IS NULL
   AND ExpiresAt > {now}
+    AND Provider IS NULL
   AND CodeVerifier IS NULL
   AND Nonce IS NULL;",
             cancellationToken);
@@ -103,6 +105,7 @@ WHERE State = {state}
             CreatedAt = entity.CreatedAt,
             ExpiresAt = entity.ExpiresAt,
             UsedAt = entity.UsedAt,
+            Provider = entity.Provider,
             CodeVerifier = entity.CodeVerifier,
             Nonce = entity.Nonce,
         };

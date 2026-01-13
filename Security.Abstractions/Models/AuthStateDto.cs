@@ -8,6 +8,8 @@ public sealed record AuthStateDto
     public required System.DateTimeOffset ExpiresAt { get; init; }
     public System.DateTimeOffset? UsedAt { get; init; }
 
+    public string? Provider { get; init; }
+
     public string? CodeVerifier { get; init; }
     public string? Nonce { get; init; }
 }

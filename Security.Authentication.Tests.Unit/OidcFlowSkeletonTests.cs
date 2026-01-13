@@ -127,7 +127,7 @@ public sealed class OidcFlowSkeletonTests
     {
         // create state and attach context
         var stateInfo = await services.AuthState.CreateStateAsync(tenantId);
-        await services.AuthState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier: "cv", nonce: "nonce");
+            await services.AuthState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
         var ctx = await services.AuthState.ConsumeStateAsync(stateInfo.State);
         Assert.NotNull(ctx);
 

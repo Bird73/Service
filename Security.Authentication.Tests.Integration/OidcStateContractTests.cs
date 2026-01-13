@@ -143,7 +143,7 @@ public sealed class OidcStateContractTests
             {
                 var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
                 var stateInfo = await authState.CreateStateAsync(tenantId);
-                await authState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier: "cv", nonce: "nonce");
+                        await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
                 state = stateInfo.State;
             }
 
@@ -268,7 +268,7 @@ public sealed class OidcStateContractTests
             {
                 var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
                 var stateInfo = await authState.CreateStateAsync(tenantId);
-                await authState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier: "cv", nonce: "nonce");
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
                 state = stateInfo.State;
             }
 
@@ -279,6 +279,122 @@ public sealed class OidcStateContractTests
             Assert.NotNull(body);
             Assert.False(body!.Success);
             Assert.Equal("provider_not_enabled", body.Error!.Code);
+        });
+    }
+
+    [Fact]
+    public async Task Provider_Mismatch_Returns_400_InvalidState_And_Consumes_State()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            await EnsureDbCreatedAsync(factory);
+
+            var tenantId = Guid.NewGuid();
+            await SeedProviderAsync(factory, tenantId, provider: "stub", enabled: true, issuer: "https://issuer.test");
+            await SeedProviderAsync(factory, tenantId, provider: "other", enabled: true, issuer: "https://issuer.test");
+
+            string state;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
+                var stateInfo = await authState.CreateStateAsync(tenantId);
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
+                state = stateInfo.State;
+            }
+
+            var mismatch = await GetCallbackAsync(client, tenantId, provider: "other", code: "external-sub-1", state);
+            Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+
+            var mismatchBody = await mismatch.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(mismatchBody);
+            Assert.False(mismatchBody!.Success);
+            Assert.Equal("invalid_state", mismatchBody.Error!.Code);
+
+            // State is one-time: even if you retry with the correct provider, it should be consumed.
+            var retry = await GetCallbackAsync(client, tenantId, provider: "stub", code: "external-sub-1", state);
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+
+            var retryBody = await retry.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(retryBody);
+            Assert.False(retryBody!.Success);
+            Assert.Equal("invalid_state", retryBody.Error!.Code);
+        });
+    }
+
+    [Fact]
+    public async Task Nonce_Mismatch_Returns_400_InvalidNonce_And_Consumes_State()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            await EnsureDbCreatedAsync(factory);
+
+            var tenantId = Guid.NewGuid();
+            await SeedProviderAsync(factory, tenantId, provider: "stub", enabled: true, issuer: "https://issuer.test");
+
+            string state;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
+                var stateInfo = await authState.CreateStateAsync(tenantId);
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv1", nonce: "nonce1");
+                state = stateInfo.State;
+            }
+
+            // Provider service MVP stub reads expected values from the code string.
+            var res = await GetCallbackAsync(client, tenantId, provider: "stub", code: "sub=external-sub-1;n=nonce2;cv=cv1", state);
+            Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+
+            var body = await res.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.False(body!.Success);
+            Assert.Equal("invalid_nonce", body.Error!.Code);
+
+            // State is one-time: retrying with correct nonce should fail.
+            var retry = await GetCallbackAsync(client, tenantId, provider: "stub", code: "sub=external-sub-1;n=nonce1;cv=cv1", state);
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+
+            var retryBody = await retry.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(retryBody);
+            Assert.False(retryBody!.Success);
+            Assert.Equal("invalid_state", retryBody.Error!.Code);
+        });
+    }
+
+    [Fact]
+    public async Task Pkce_Mismatch_Returns_400_InvalidPkce_And_Consumes_State()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            await EnsureDbCreatedAsync(factory);
+
+            var tenantId = Guid.NewGuid();
+            await SeedProviderAsync(factory, tenantId, provider: "stub", enabled: true, issuer: "https://issuer.test");
+
+            string state;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
+                var stateInfo = await authState.CreateStateAsync(tenantId);
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv1", nonce: "nonce1");
+                state = stateInfo.State;
+            }
+
+            var res = await GetCallbackAsync(client, tenantId, provider: "stub", code: "sub=external-sub-1;n=nonce1;cv=cv2", state);
+            Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
+
+            var body = await res.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.False(body!.Success);
+            Assert.Equal("invalid_pkce", body.Error!.Code);
+
+            // State is one-time: retrying with correct code_verifier should fail.
+            var retry = await GetCallbackAsync(client, tenantId, provider: "stub", code: "sub=external-sub-1;n=nonce1;cv=cv1", state);
+            Assert.Equal(HttpStatusCode.BadRequest, retry.StatusCode);
+
+            var retryBody = await retry.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(retryBody);
+            Assert.False(retryBody!.Success);
+            Assert.Equal("invalid_state", retryBody.Error!.Code);
         });
     }
 
@@ -302,7 +418,7 @@ public sealed class OidcStateContractTests
                 var externalStore = scope.ServiceProvider.GetRequiredService<IExternalIdentityStore>();
 
                 var stateInfo = await authState.CreateStateAsync(tenantId);
-                await authState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier: "cv", nonce: "nonce");
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
                 state = stateInfo.State;
 
                 var mapping = new ExternalIdentityMapping(
@@ -347,14 +463,15 @@ public sealed class OidcStateContractTests
 
             var info = await authState.CreateStateAsync(tenantId);
 
-            var attached = await authState.TryAttachOidcContextAsync(info.State, codeVerifier: "cv1", nonce: "nonce1");
+            var attached = await authState.TryAttachOidcContextAsync(info.State, provider: "stub", codeVerifier: "cv1", nonce: "nonce1");
             Assert.True(attached);
 
-            var second = await authState.TryAttachOidcContextAsync(info.State, codeVerifier: "cv2", nonce: "nonce2");
+            var second = await authState.TryAttachOidcContextAsync(info.State, provider: "stub", codeVerifier: "cv2", nonce: "nonce2");
             Assert.False(second);
 
             var ctx = await authState.ConsumeStateAsync(info.State);
             Assert.NotNull(ctx);
+            Assert.Equal("stub", ctx!.Provider);
             Assert.Equal("cv1", ctx!.CodeVerifier);
             Assert.Equal("nonce1", ctx.Nonce);
         });

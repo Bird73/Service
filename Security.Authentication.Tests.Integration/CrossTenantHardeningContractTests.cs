@@ -188,7 +188,7 @@ public sealed class CrossTenantHardeningContractTests
             {
                 var authState = scope.ServiceProvider.GetRequiredService<IAuthStateService>();
                 var stateInfo = await authState.CreateStateAsync(tenantA);
-                await authState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier: "cv", nonce: "nonce");
+                await authState.TryAttachOidcContextAsync(stateInfo.State, provider: "stub", codeVerifier: "cv", nonce: "nonce");
                 state = stateInfo.State;
             }
 

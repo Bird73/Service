@@ -12,6 +12,7 @@ public sealed class InMemoryAuthStateService : IAuthStateService
         Guid TenantId,
         DateTimeOffset ExpiresAt,
         DateTimeOffset? UsedAt,
+        string? Provider,
         string? CodeVerifier,
         string? Nonce);
 
@@ -22,7 +23,7 @@ public sealed class InMemoryAuthStateService : IAuthStateService
         _ = cancellationToken;
         var state = Base64Url.Encode(RandomNumberGenerator.GetBytes(24));
         var expiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
-        _states[state] = new StateRecord(tenantId, expiresAt, UsedAt: null, CodeVerifier: null, Nonce: null);
+        _states[state] = new StateRecord(tenantId, expiresAt, UsedAt: null, Provider: null, CodeVerifier: null, Nonce: null);
         return Task.FromResult(new AuthStateInfo { State = state, ExpiresAt = expiresAt });
     }
 
@@ -44,6 +45,7 @@ public sealed class InMemoryAuthStateService : IAuthStateService
 
     public Task<bool> TryAttachOidcContextAsync(
         string state,
+        string provider,
         string codeVerifier,
         string nonce,
         CancellationToken cancellationToken = default)
@@ -62,12 +64,12 @@ public sealed class InMemoryAuthStateService : IAuthStateService
                 return Task.FromResult(false);
             }
 
-            if (rec.CodeVerifier is not null || rec.Nonce is not null)
+            if (rec.Provider is not null || rec.CodeVerifier is not null || rec.Nonce is not null)
             {
                 return Task.FromResult(false);
             }
 
-            var updated = rec with { CodeVerifier = codeVerifier, Nonce = nonce };
+            var updated = rec with { Provider = provider, CodeVerifier = codeVerifier, Nonce = nonce };
             if (_states.TryUpdate(state, updated, rec))
             {
                 return Task.FromResult(true);
@@ -91,7 +93,9 @@ public sealed class InMemoryAuthStateService : IAuthStateService
                 return Task.FromResult<AuthStateContext?>(null);
             }
 
-            if (string.IsNullOrWhiteSpace(rec.CodeVerifier) || string.IsNullOrWhiteSpace(rec.Nonce))
+            if (string.IsNullOrWhiteSpace(rec.Provider)
+                || string.IsNullOrWhiteSpace(rec.CodeVerifier)
+                || string.IsNullOrWhiteSpace(rec.Nonce))
             {
                 return Task.FromResult<AuthStateContext?>(null);
             }
@@ -102,6 +106,7 @@ public sealed class InMemoryAuthStateService : IAuthStateService
                 var ctx = new AuthStateContext
                 {
                     TenantId = rec.TenantId,
+                    Provider = rec.Provider!,
                     CodeVerifier = rec.CodeVerifier!,
                     Nonce = rec.Nonce!,
                     ExpiresAt = rec.ExpiresAt,

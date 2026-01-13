@@ -9,6 +9,8 @@ public sealed record AuthStateContext
 {
     public required Guid TenantId { get; init; }
 
+    public required string Provider { get; init; }
+
     public required string CodeVerifier { get; init; }
 
     public required string Nonce { get; init; }

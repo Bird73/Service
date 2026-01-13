@@ -1133,7 +1133,7 @@ static async Task<IResult> OidcChallenge(
     var stateInfo = await authState.CreateStateAsync(tenant.TenantId, ct);
     var codeVerifier = Pkce.CreateCodeVerifier();
     var nonce = Nonce.Create();
-    _ = await authState.TryAttachOidcContextAsync(stateInfo.State, codeVerifier, nonce, ct);
+    _ = await authState.TryAttachOidcContextAsync(stateInfo.State, provider, codeVerifier, nonce, ct);
 
     var url = await oidc.GetAuthorizationUrlAsync(
         tenant.TenantId,
@@ -1246,6 +1246,27 @@ static async Task<IResult> OidcCallback(
         return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidState), statusCode: StatusCodes.Status400BadRequest);
     }
 
+    // State is bound to the provider used during the challenge.
+    if (!string.Equals(ctx.Provider, provider, StringComparison.OrdinalIgnoreCase))
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = AuthErrorCodes.InvalidState,
+            Detail = "provider_mismatch",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidState), statusCode: StatusCodes.Status400BadRequest);
+    }
+
     var tenantDto = await tenants.FindAsync(ctx.TenantId, ct);
     if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
     {
@@ -1290,6 +1311,44 @@ static async Task<IResult> OidcCallback(
     try
     {
         userInfo = await oidc.ExchangeCodeAsync(ctx.TenantId, provider, code, ctx, cancellationToken: ct);
+    }
+    catch (Birdsoft.Security.Abstractions.Services.OidcNonceMismatchException ex)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = AuthErrorCodes.InvalidNonce,
+            Detail = ex.GetType().Name,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidNonce), statusCode: StatusCodes.Status400BadRequest);
+    }
+    catch (Birdsoft.Security.Abstractions.Services.OidcPkceMismatchException ex)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = ctx.TenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = AuthErrorCodes.InvalidPkce,
+            Detail = ex.GetType().Name,
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidPkce), statusCode: StatusCodes.Status400BadRequest);
     }
     catch (Exception ex)
     {

@@ -8,6 +8,8 @@ public sealed class AuthStateEntity
     public DateTimeOffset ExpiresAt { get; set; }
     public DateTimeOffset? UsedAt { get; set; }
 
+    public string? Provider { get; set; }
+
     public string? CodeVerifier { get; set; }
     public string? Nonce { get; set; }
 }

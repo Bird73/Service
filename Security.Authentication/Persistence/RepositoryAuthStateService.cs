@@ -53,14 +53,17 @@ public sealed class RepositoryAuthStateService : IAuthStateService
         return dto.TenantId;
     }
 
-    public Task<bool> TryAttachOidcContextAsync(string state, string codeVerifier, string nonce, CancellationToken cancellationToken = default)
+    public Task<bool> TryAttachOidcContextAsync(string state, string provider, string codeVerifier, string nonce, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(state) || string.IsNullOrWhiteSpace(codeVerifier) || string.IsNullOrWhiteSpace(nonce))
+        if (string.IsNullOrWhiteSpace(state)
+            || string.IsNullOrWhiteSpace(provider)
+            || string.IsNullOrWhiteSpace(codeVerifier)
+            || string.IsNullOrWhiteSpace(nonce))
         {
             return Task.FromResult(false);
         }
 
-        return _repo.TryAttachOidcContextAsync(state, codeVerifier, nonce, cancellationToken);
+        return _repo.TryAttachOidcContextAsync(state, provider, codeVerifier, nonce, cancellationToken);
     }
 
     public async Task<AuthStateContext?> ConsumeStateAsync(string state, CancellationToken cancellationToken = default)
@@ -76,7 +79,9 @@ public sealed class RepositoryAuthStateService : IAuthStateService
             return null;
         }
 
-        if (string.IsNullOrWhiteSpace(dto.CodeVerifier) || string.IsNullOrWhiteSpace(dto.Nonce))
+        if (string.IsNullOrWhiteSpace(dto.Provider)
+            || string.IsNullOrWhiteSpace(dto.CodeVerifier)
+            || string.IsNullOrWhiteSpace(dto.Nonce))
         {
             return null;
         }
@@ -84,6 +89,7 @@ public sealed class RepositoryAuthStateService : IAuthStateService
         return new AuthStateContext
         {
             TenantId = dto.TenantId,
+            Provider = dto.Provider,
             CodeVerifier = dto.CodeVerifier,
             Nonce = dto.Nonce,
             ExpiresAt = dto.ExpiresAt,
