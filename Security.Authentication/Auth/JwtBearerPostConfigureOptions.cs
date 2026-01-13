@@ -45,6 +45,12 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
         // NOTE: key rotation must work without restart. Use IssuerSigningKeyResolver to resolve keys at validation time.
         IEnumerable<SecurityKey> ResolveKeys(Guid? tenantId, string? kid, string? alg)
         {
+            // Spec: access tokens must include kid; missing kid must fail validation.
+            if (string.IsNullOrWhiteSpace(kid))
+            {
+                return Array.Empty<SecurityKey>();
+            }
+
             var jwt = _jwtOptions.CurrentValue;
             var safety = _safetyOptions.CurrentValue;
             var effective = tenantId.HasValue ? JwtTenantResolution.Resolve(jwt, tenantId.Value) : JwtTenantResolution.Resolve(jwt, Guid.Empty);
@@ -63,7 +69,7 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                         continue;
                     }
 
-                    if (!string.IsNullOrWhiteSpace(kid) && !string.Equals(k.Kid, kid, StringComparison.Ordinal))
+                    if (!string.Equals(k.Kid, kid, StringComparison.Ordinal))
                     {
                         continue;
                     }
@@ -95,6 +101,11 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             // Back-compat: include legacy provider key
             if (keys.Count == 0)
             {
+                if (!string.Equals(kid, _keys.Kid, StringComparison.Ordinal))
+                {
+                    return Array.Empty<SecurityKey>();
+                }
+
                 if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
                 {
                     var rsa = _keys.GetRsaPublicKey();

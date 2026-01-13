@@ -51,6 +51,12 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
 
         public string EnvironmentId { get; init; } = "test";
         public bool SafetyEnabled { get; init; } = false;
+
+        /// <summary>
+        /// Extra configuration entries to inject for a test.
+        /// Useful for complex option binding like JwtOptions.KeyRing.Keys[n].*
+        /// </summary>
+        public IReadOnlyDictionary<string, string?>? ExtraConfiguration { get; init; }
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -80,6 +86,14 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
 
                 [$"{MfaOptions.SectionName}:AllowSkipOnProviderFailure"] = _overrides.AllowSkipOnMfaProviderFailure.ToString(),
             };
+
+            if (_overrides.ExtraConfiguration is not null)
+            {
+                foreach (var kv in _overrides.ExtraConfiguration)
+                {
+                    dict[kv.Key] = kv.Value;
+                }
+            }
 
             config.AddInMemoryCollection(dict);
         });

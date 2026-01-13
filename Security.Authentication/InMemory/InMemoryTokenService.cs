@@ -78,12 +78,13 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
         }
 
-        if (!string.Equals(tokenAlg, _keys.Algorithm, StringComparison.OrdinalIgnoreCase))
+        if (!TryGetHeaderKid(headerJson, out var tokenKid))
         {
+            // Spec requires kid.
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
         }
 
-        if (!VerifySignature(parts[0] + "." + parts[1], parts[2]))
+        if (!VerifySignature(parts[0] + "." + parts[1], parts[2], tokenAlg, tokenKid, opts))
         {
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
         }
@@ -473,28 +474,95 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         return ComputeHmacSha256(signingInput, key);
     }
 
-    private bool VerifySignature(string signingInput, string signaturePart)
+    private bool VerifySignature(string signingInput, string signaturePart, string tokenAlg, string tokenKid, JwtOptions opts)
     {
-        if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+        foreach (var v in ResolveValidationKeys(tokenAlg, tokenKid, opts))
         {
-            var rsa = _keys.GetRsaPublicKey();
-            if (rsa is null)
+            if (tokenAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                if (v.RsaPublic is null)
+                {
+                    continue;
+                }
+
+                var sigBytes = Base64Url.Decode(signaturePart);
+                if (v.RsaPublic.VerifyData(Encoding.ASCII.GetBytes(signingInput), sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
+                {
+                    return true;
+                }
+
+                continue;
             }
 
-            var sigBytes = Base64Url.Decode(signaturePart);
-            return rsa.VerifyData(Encoding.ASCII.GetBytes(signingInput), sigBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            if (tokenAlg.StartsWith("HS", StringComparison.OrdinalIgnoreCase))
+            {
+                if (v.SymmetricKey is null || v.SymmetricKey.Length == 0)
+                {
+                    continue;
+                }
+
+                var expected = ComputeHmacSha256(signingInput, v.SymmetricKey);
+                if (CryptographicOperations.FixedTimeEquals(Base64Url.Decode(signaturePart), Base64Url.Decode(expected)))
+                {
+                    return true;
+                }
+            }
         }
 
-        var key = _keys.GetSymmetricKeyBytes();
-        if (key is null || key.Length == 0)
+        return false;
+    }
+
+    private sealed record ValidationKey(string Kid, RSA? RsaPublic, byte[]? SymmetricKey);
+
+    private IEnumerable<ValidationKey> ResolveValidationKeys(string tokenAlg, string tokenKid, JwtOptions opts)
+    {
+        if (opts.KeyRing?.Keys is { Length: > 0 })
         {
-            return false;
+            foreach (var k in opts.KeyRing.Keys)
+            {
+                if (k.Status == JwtKeyStatus.Disabled)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(k.Kid, tokenKid, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var alg = string.IsNullOrWhiteSpace(k.Algorithm) ? "RS256" : k.Algorithm.Trim();
+                if (!string.Equals(alg, tokenAlg, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    var rsa = TryLoadRsa(k.PublicKeyPem) ?? (!string.IsNullOrWhiteSpace(k.PrivateKeyPem) ? CreatePublicFromPrivate(k.PrivateKeyPem) : null);
+                    yield return new ValidationKey(k.Kid, rsa, null);
+                    continue;
+                }
+
+                if (alg.StartsWith("HS", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(k.SymmetricKey))
+                {
+                    yield return new ValidationKey(k.Kid, null, Encoding.UTF8.GetBytes(k.SymmetricKey));
+                }
+            }
         }
 
-        var expected = ComputeHmacSha256(signingInput, key);
-        return CryptographicOperations.FixedTimeEquals(Base64Url.Decode(signaturePart), Base64Url.Decode(expected));
+        // Legacy fallback: only accept when both alg and kid match.
+        if (_keys.Algorithm.Equals(tokenAlg, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(_keys.Kid, tokenKid, StringComparison.Ordinal))
+        {
+            if (tokenAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return new ValidationKey(_keys.Kid, _keys.GetRsaPublicKey(), null);
+            }
+            else
+            {
+                yield return new ValidationKey(_keys.Kid, null, _keys.GetSymmetricKeyBytes());
+            }
+        }
     }
 
     private static bool TryGetHeaderAlg(string headerJson, out string alg)
@@ -515,6 +583,70 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
 
         alg = string.Empty;
         return false;
+    }
+
+    private static bool TryGetHeaderKid(string headerJson, out string kid)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(headerJson);
+            if (doc.RootElement.TryGetProperty("kid", out var k) && k.ValueKind == JsonValueKind.String)
+            {
+                kid = k.GetString() ?? string.Empty;
+                return !string.IsNullOrWhiteSpace(kid);
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        kid = string.Empty;
+        return false;
+    }
+
+    private static RSA? TryLoadRsa(string? pemOrBase64)
+    {
+        if (string.IsNullOrWhiteSpace(pemOrBase64))
+        {
+            return null;
+        }
+
+        try
+        {
+            var rsa = RSA.Create();
+            rsa.ImportFromPem(pemOrBase64);
+            return rsa;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(pemOrBase64);
+            var rsa = RSA.Create();
+            rsa.ImportPkcs8PrivateKey(bytes, out _);
+            return rsa;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static RSA? CreatePublicFromPrivate(string privatePem)
+    {
+        var rsaPriv = TryLoadRsa(privatePem);
+        if (rsaPriv is null)
+        {
+            return null;
+        }
+
+        var rsaPub = RSA.Create();
+        rsaPub.ImportParameters(rsaPriv.ExportParameters(includePrivateParameters: false));
+        return rsaPub;
     }
 
     private static string ComputeHmacSha256(string signingInput, byte[] keyBytes)

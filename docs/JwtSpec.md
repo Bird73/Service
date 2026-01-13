@@ -36,5 +36,7 @@ Access Token 必須至少包含：
 - `iss` 必須符合設定
 - `aud` 必須包含設定 audience
 - `exp/iat/nbf` 必須落在允許的時間窗（由 `JwtOptions.ClockSkewSeconds` 控制）
+- `kid`（JWT header）必須存在：驗證端依 `kid` 選擇 signing key；缺失或未知視為 `invalid_token`
+- key rotation：新舊 key 共存期間，舊 token 必須仍可驗證；移除舊 key 後，舊 token 必須不可驗證
 - 若採即時撤銷：驗證端必須檢查 `jti` 是否在 denylist 或版本號是否匹配
 - 若 token 包含 `session_id`：驗證端應檢查 session 是否仍為 active（否則視為 `session_terminated`）
