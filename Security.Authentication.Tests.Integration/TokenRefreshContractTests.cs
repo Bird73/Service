@@ -282,4 +282,94 @@ public sealed class TokenRefreshContractTests
             Assert.Equal("invalid_token_version", body.Error!.Code);
         });
     }
+
+    [Fact]
+    public async Task Refresh_Concurrent_Rotation_With_Same_Token_Is_OneSuccess_OneFailure_And_Rotation_Is_Enforced()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+            var initial = await IssueInitialTokensAsync(factory, tenantId, ourSubject);
+
+            // Fire two refresh requests concurrently using the same refresh token.
+            var t1 = PostRefreshAsync(client, tenantId, initial.RefreshToken);
+            var t2 = PostRefreshAsync(client, tenantId, initial.RefreshToken);
+            var res = await Task.WhenAll(t1, t2);
+
+            Assert.Equal(2, res.Length);
+            Assert.Equal(1, res.Count(r => r.StatusCode == HttpStatusCode.OK));
+            Assert.Equal(1, res.Count(r => r.StatusCode == HttpStatusCode.Unauthorized));
+
+            var okRes = res.Single(r => r.StatusCode == HttpStatusCode.OK);
+            var failRes = res.Single(r => r.StatusCode == HttpStatusCode.Unauthorized);
+
+            var okBody = await okRes.Content.ReadFromJsonAsync<ApiResponse<TokenPair>>(JsonOptions);
+            Assert.NotNull(okBody);
+            Assert.True(okBody!.Success);
+            Assert.NotNull(okBody.Data);
+            Assert.False(string.IsNullOrWhiteSpace(okBody.Data!.RefreshToken));
+            Assert.NotEqual(initial.RefreshToken, okBody.Data.RefreshToken);
+
+            var failBody = await failRes.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(failBody);
+            Assert.False(failBody!.Success);
+            Assert.True(
+                string.Equals(failBody.Error!.Code, "revoked_refresh_token", StringComparison.Ordinal)
+                || string.Equals(failBody.Error.Code, Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected, StringComparison.Ordinal));
+
+            // Session behavior is policy-dependent:
+            // - If the concurrent loser is treated as a normal revoked token, session should remain active.
+            // - If treated as reuse attack, session may be terminated (and the newly issued refresh may become unusable).
+            var revokeReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/token/revoke")
+            {
+                Content = JsonContent.Create(new TokenRevokeRequest(RefreshToken: null, AllDevices: false)),
+            };
+            revokeReq.Headers.Add("X-Tenant-Id", tenantId.ToString());
+
+            if (string.Equals(failBody.Error.Code, "revoked_refresh_token", StringComparison.Ordinal))
+            {
+                // Rotation must be effective: using the new refresh token should succeed.
+                var res2 = await PostRefreshAsync(client, tenantId, okBody.Data.RefreshToken);
+                Assert.Equal(HttpStatusCode.OK, res2.StatusCode);
+
+                var okBody2 = await res2.Content.ReadFromJsonAsync<ApiResponse<TokenPair>>(JsonOptions);
+                Assert.NotNull(okBody2);
+                Assert.True(okBody2!.Success);
+                Assert.NotNull(okBody2.Data);
+
+                // Session should remain active.
+                revokeReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", okBody2.Data.AccessToken);
+                var revokeRes = await client.SendAsync(revokeReq);
+                Assert.Equal(HttpStatusCode.OK, revokeRes.StatusCode);
+            }
+            else
+            {
+                // If treated as reuse attack, session may be terminated.
+                // Attempting to use the newly issued refresh token may also fail due to session termination.
+                var res2 = await PostRefreshAsync(client, tenantId, okBody.Data.RefreshToken);
+                Assert.Equal(HttpStatusCode.Unauthorized, res2.StatusCode);
+
+                var body2 = await res2.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+                Assert.NotNull(body2);
+                Assert.False(body2!.Success);
+                Assert.True(
+                    string.Equals(body2.Error!.Code, "session_terminated", StringComparison.Ordinal)
+                    || string.Equals(body2.Error.Code, "revoked_refresh_token", StringComparison.Ordinal)
+                    || string.Equals(body2.Error.Code, Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected, StringComparison.Ordinal));
+
+                revokeReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", okBody.Data.AccessToken);
+                var revokeRes = await client.SendAsync(revokeReq);
+                Assert.Equal(HttpStatusCode.Unauthorized, revokeRes.StatusCode);
+                var revokeBody = await revokeRes.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+                Assert.NotNull(revokeBody);
+                Assert.False(revokeBody!.Success);
+                Assert.Equal("session_terminated", revokeBody.Error!.Code);
+            }
+
+            // Further use of the old refresh token must fail (rotation enforcement).
+            var resOld = await PostRefreshAsync(client, tenantId, initial.RefreshToken);
+            Assert.Equal(HttpStatusCode.Unauthorized, resOld.StatusCode);
+        });
+    }
 }

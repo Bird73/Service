@@ -52,6 +52,59 @@ public sealed class EfRefreshTokenRepository : IRefreshTokenRepository
         return entity is null ? null : ToDto(entity);
     }
 
+    public async Task<RefreshTokenDto?> TryRotateAsync(
+        Guid tenantId,
+        Guid ourSubject,
+        Guid sessionId,
+        string currentTokenHash,
+        string newTokenHash,
+        DateTimeOffset expiresAt,
+        DateTimeOffset now,
+        int issuedTenantTokenVersion,
+        int issuedSubjectTokenVersion,
+        CancellationToken cancellationToken = default)
+    {
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+
+        var newEntity = new RefreshTokenEntity
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            SessionId = sessionId,
+            TokenHash = newTokenHash,
+            CreatedAt = now,
+            ExpiresAt = expiresAt,
+            RevokedAt = null,
+            ReplacedByRefreshTokenId = null,
+            IssuedTenantTokenVersion = issuedTenantTokenVersion,
+            IssuedSubjectTokenVersion = issuedSubjectTokenVersion,
+        };
+
+        _db.RefreshTokens.Add(newEntity);
+        await _db.SaveChangesAsync(cancellationToken);
+
+        var affected = await _db.RefreshTokens
+            .Where(x => x.TenantId == tenantId
+                        && x.OurSubject == ourSubject
+                        && x.TokenHash == currentTokenHash
+                        && x.RevokedAt == null)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(x => x.RevokedAt, now)
+                    .SetProperty(x => x.ReplacedByRefreshTokenId, newEntity.Id),
+                cancellationToken);
+
+        if (affected != 1)
+        {
+            await tx.RollbackAsync(cancellationToken);
+            return null;
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return ToDto(newEntity);
+    }
+
     public async Task<bool> RevokeAsync(
         Guid tenantId,
         Guid ourSubject,

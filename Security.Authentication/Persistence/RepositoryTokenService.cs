@@ -331,21 +331,27 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail("invalid_token_version");
         }
 
-        // rotation: create new refresh, revoke old with replacedBy
+        // rotation (atomic): create new refresh and revoke old with replacedBy in the same transaction
         var opts = _jwtOptions.CurrentValue;
         var newRefreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
         var newHash = HashRefreshToken(newRefreshToken);
-        var newDto = await _refresh.CreateAsync(
-            dto.TenantId,
-            dto.OurSubject,
-            dto.SessionId,
-            newHash,
-            dto.ExpiresAt,
+        var newDto = await _refresh.TryRotateAsync(
+            tenantId: dto.TenantId,
+            ourSubject: dto.OurSubject,
+            sessionId: dto.SessionId,
+            currentTokenHash: dto.TokenHash,
+            newTokenHash: newHash,
+            expiresAt: dto.ExpiresAt,
+            now: now,
             issuedTenantTokenVersion: currentTenantTv,
             issuedSubjectTokenVersion: currentSubjectTv,
             cancellationToken);
 
-        _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, replacedByTokenId: newDto.Id, cancellationToken: cancellationToken);
+        if (newDto is null)
+        {
+            // Another request rotated/revoked it first (concurrent refresh). Deterministic: fail this attempt.
+            return RefreshResult.Fail("revoked_refresh_token");
+        }
 
         var jti = Guid.NewGuid().ToString("N");
         var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, dto.SessionId, currentTenantTv, currentSubjectTv, roles: null, scopes: null);

@@ -22,6 +22,22 @@ public interface IRefreshTokenRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 嘗試進行 rotation：建立新 token，並以 replacedBy 設定撤銷舊 token。
+    /// 必須在同一交易中完成，避免併發導致雙花。
+    /// </summary>
+    Task<RefreshTokenDto?> TryRotateAsync(
+        Guid tenantId,
+        Guid ourSubject,
+        Guid sessionId,
+        string currentTokenHash,
+        string newTokenHash,
+        DateTimeOffset expiresAt,
+        DateTimeOffset now,
+        int issuedTenantTokenVersion,
+        int issuedSubjectTokenVersion,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 撤銷指定 token（可選設定 replacedBy）
     /// </summary>
     Task<bool> RevokeAsync(
