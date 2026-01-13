@@ -8,6 +8,7 @@ using Birdsoft.Security.Authentication.Jwt;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 using System;
 using System.Collections.Generic;
@@ -118,10 +119,24 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
         bool TryGetTenantIdFromToken(SecurityToken? securityToken, out Guid tenantId)
         {
             tenantId = default;
-            var jwtToken = securityToken as System.IdentityModel.Tokens.Jwt.JwtSecurityToken;
-            var raw = jwtToken?.Claims?.FirstOrDefault(c => string.Equals(c.Type, SecurityClaimTypes.TenantId, StringComparison.Ordinal))?.Value;
+
+            string? raw = securityToken switch
+            {
+                System.IdentityModel.Tokens.Jwt.JwtSecurityToken jwt => jwt.Claims.FirstOrDefault(c => string.Equals(c.Type, SecurityClaimTypes.TenantId, StringComparison.Ordinal))?.Value,
+                JsonWebToken j => j.Claims.FirstOrDefault(c => string.Equals(c.Type, SecurityClaimTypes.TenantId, StringComparison.Ordinal))?.Value,
+                _ => null,
+            };
+
             return Guid.TryParse(raw, out tenantId);
         }
+
+        static string? TryGetAlgFromToken(SecurityToken? securityToken)
+            => securityToken switch
+            {
+                System.IdentityModel.Tokens.Jwt.JwtSecurityToken jwt => jwt.Header?.Alg,
+                JsonWebToken j => j.Alg,
+                _ => null,
+            };
 
         bool ShouldValidateIssuer(JwtOptions jwt)
             => !string.IsNullOrWhiteSpace(jwt.Issuer) || (jwt.Tenants?.Any(t => !string.IsNullOrWhiteSpace(t.Issuer)) ?? false);
@@ -134,8 +149,7 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             ValidateIssuerSigningKey = true,
             IssuerSigningKeyResolver = (token, securityToken, kid, validationParameters) =>
             {
-                var jwtToken = securityToken as System.IdentityModel.Tokens.Jwt.JwtSecurityToken;
-                var alg = jwtToken?.Header?.Alg;
+                var alg = TryGetAlgFromToken(securityToken);
                 return ResolveKeys(TryGetTenantIdFromToken(securityToken, out var tid) ? tid : null, kid, alg).ToArray();
             },
             RequireSignedTokens = true,

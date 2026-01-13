@@ -20,10 +20,12 @@ using Birdsoft.Security.Authentication.Observability.Health;
 using Birdsoft.Security.Authentication.Persistence;
 using Birdsoft.Security.Authentication.Tenancy;
 using Birdsoft.Security.Authentication.Observability.Logging;
+using Birdsoft.Security.Authentication.Authz;
 using Birdsoft.Security.Data.EfCore;
 using Birdsoft.Infrastructure.Logging.Abstractions;
 using Birdsoft.Infrastructure.Logging.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -130,8 +132,26 @@ builder.Services.AddAuthorization(o =>
             return perms.Any(p => string.Equals(p, "security:admin", StringComparison.OrdinalIgnoreCase));
         });
     });
+
+    // Test-only policies (used by /api/v1/test/* endpoints).
+    o.AddPolicy(TestAuthorizationPolicies.ScopeRead, policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.AddRequirements(new RequireScopeAuthorizationRequirement(TestAuthorizationPolicies.RequiredScopeRead));
+    });
+
+    o.AddPolicy(TestAuthorizationPolicies.AdminRole, policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.AddRequirements(new RequireRoleAuthorizationRequirement(TestAuthorizationPolicies.RequiredRoleAdmin));
+    });
 });
 builder.Services.AddSingleton<IPostConfigureOptions<JwtBearerOptions>, BirdsoftJwtBearerPostConfigureOptions>();
+
+// Emit spec-like JSON bodies for 401/403 produced by authorization middleware.
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ApiAuthorizationMiddlewareResultHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, RequireScopeAuthorizationHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, RequireRoleAuthorizationHandler>();
 
 builder.Services.AddSingleton<ITenantResolver, HeaderOrClaimTenantResolver>();
 builder.Services.AddScoped<TenantContextAccessor>();
@@ -229,6 +249,21 @@ app.UseMiddleware<TenantResolutionMiddleware>();
 var api = app.MapGroup("/api/v1");
 var auth = api.MapGroup("/auth");
 auth.AddEndpointFilter(new MetricsEndpointFilter("auth"));
+
+// Test-only endpoints (integration test host can enable via TestEndpoints:Enabled=true).
+if (app.Configuration.GetValue<bool>("TestEndpoints:Enabled"))
+{
+    var test = api.MapGroup("/test");
+
+    test.MapGet("/protected", () => Results.Json(ApiResponse<object>.Ok(new { ok = true })))
+        .RequireAuthorization();
+
+    test.MapGet("/protected-scope", () => Results.Json(ApiResponse<object>.Ok(new { ok = true })))
+        .RequireAuthorization(TestAuthorizationPolicies.ScopeRead);
+
+    test.MapGet("/protected-role", () => Results.Json(ApiResponse<object>.Ok(new { ok = true })))
+        .RequireAuthorization(TestAuthorizationPolicies.AdminRole);
+}
 
 static IReadOnlyDictionary<string, string[]> SingleField(string field, string message)
     => new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase) { [field] = [message] };

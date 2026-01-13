@@ -40,6 +40,8 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
 
         public bool AllowSkipOnMfaProviderFailure { get; init; } = false;
 
+        public bool EnableTestEndpoints { get; init; } = false;
+
         public string JwtIssuer { get; init; } = "https://security.test";
         public string JwtAudience { get; init; } = "service";
         public string JwtSigningKey { get; init; } = "dev-signing-key-123456789012345678901234567890";
@@ -60,6 +62,8 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
             var dict = new Dictionary<string, string?>
             {
                 ["ConnectionStrings:SecurityDb"] = _overrides.SecurityDbConnectionString,
+
+                ["TestEndpoints:Enabled"] = _overrides.EnableTestEndpoints.ToString(),
 
                 [$"{JwtOptions.SectionName}:Issuer"] = _overrides.JwtIssuer,
                 [$"{JwtOptions.SectionName}:Audience"] = _overrides.JwtAudience,
