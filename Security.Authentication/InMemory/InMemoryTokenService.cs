@@ -31,6 +31,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
     private readonly IOptionsMonitor<RefreshTokenHashingOptions> _refreshHashing;
     private readonly IJwtKeyProvider _keys;
     private readonly ISessionStore _sessions;
+    private readonly TimeProvider _time;
     private readonly ConcurrentDictionary<string, RefreshRecord> _refresh = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(Guid TenantId, string Jti), DateTimeOffset> _revokedJti = new();
 
@@ -41,7 +42,8 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         IHostEnvironment hostEnvironment,
         IOptionsMonitor<RefreshTokenHashingOptions> refreshHashing,
         IJwtKeyProvider keys,
-        ISessionStore sessions)
+        ISessionStore sessions,
+        TimeProvider? timeProvider = null)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
@@ -50,6 +52,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         _refreshHashing = refreshHashing;
         _keys = keys;
         _sessions = sessions;
+        _time = timeProvider ?? TimeProvider.System;
     }
 
     public Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
@@ -93,11 +96,19 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
         }
 
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var skew = opts.ClockSkewSeconds;
+        var now = _time.GetUtcNow().ToUnixTimeSeconds();
+
+        // nbf not reached => fail (allow within clock skew)
+        if (TryGetLong(root, "nbf", out var nbf) && nbf - skew > now)
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail(AuthErrorCodes.TokenNotYetValid));
+        }
+
+        // exp passed => fail (deterministic boundary rule: valid if now <= exp + skew)
         if (exp + skew < now)
         {
-            return Task.FromResult(AccessTokenValidationResult.Fail("expired_token"));
+            return Task.FromResult(AccessTokenValidationResult.Fail(AuthErrorCodes.TokenExpired));
         }
 
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
@@ -151,7 +162,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
 
         if (_revokedJti.TryGetValue((tenantId, jti), out var revokedUntil))
         {
-            if (revokedUntil > DateTimeOffset.UtcNow)
+            if (revokedUntil > _time.GetUtcNow())
             {
                 return Task.FromResult(AccessTokenValidationResult.Fail("revoked_token"));
             }
@@ -206,7 +217,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             return Task.FromResult(false);
         }
 
-        if (until <= DateTimeOffset.UtcNow)
+        if (until <= _time.GetUtcNow())
         {
             _revokedJti.TryRemove((tenantId, jti), out _);
             return Task.FromResult(false);
@@ -222,7 +233,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         IReadOnlyList<string>? scopes = null,
         CancellationToken cancellationToken = default)
     {
-        var sessionId = _sessions.CreateSessionAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken)
+        var sessionId = _sessions.CreateSessionAsync(tenantId, ourSubject, _time.GetUtcNow(), cancellationToken)
             .GetAwaiter()
             .GetResult();
         var opts = _jwtOptions.CurrentValue;
@@ -231,7 +242,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, roles, scopes);
 
         var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
-        var refreshExpires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, opts.RefreshTokenDays));
+        var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
         _refresh[HashRefreshToken(refreshToken)] = new RefreshRecord(tenantId, ourSubject, sessionId, refreshExpires, Revoked: false, ReplacedByTokenHash: null);
 
         return Task.FromResult(new TokenPair
@@ -262,7 +273,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             return Task.FromResult(RefreshResult.Fail("session_terminated"));
         }
 
-        if (rec.ExpiresAt <= DateTimeOffset.UtcNow)
+        if (rec.ExpiresAt <= _time.GetUtcNow())
         {
             return Task.FromResult(RefreshResult.Fail("expired_refresh_token"));
         }
@@ -280,7 +291,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
                     }
                 }
 
-                _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, DateTimeOffset.UtcNow, reason: "refresh_reuse", cancellationToken)
+                _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "refresh_reuse", cancellationToken)
                     .GetAwaiter()
                     .GetResult();
 
@@ -326,7 +337,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         }
 
         _refresh[tokenHash] = rec with { Revoked = true };
-        _ = _sessions.TerminateSessionAsync(tenantId, rec.SessionId, DateTimeOffset.UtcNow, reason: "refresh_revoke", cancellationToken)
+        _ = _sessions.TerminateSessionAsync(tenantId, rec.SessionId, _time.GetUtcNow(), reason: "refresh_revoke", cancellationToken)
             .GetAwaiter()
             .GetResult();
         return Task.FromResult(RevokeResult.Success());
@@ -335,7 +346,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
     public Task<int> RevokeAllAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
-        _ = _sessions.TerminateAllAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, reason: "revoke_all", cancellationToken)
+        _ = _sessions.TerminateAllAsync(tenantId, ourSubject, _time.GetUtcNow(), reason: "revoke_all", cancellationToken)
             .GetAwaiter()
             .GetResult();
         var count = 0;
@@ -377,7 +388,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         IReadOnlyList<string>? roles,
         IReadOnlyList<string>? scopes)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
 
         var alg = string.IsNullOrWhiteSpace(opts.SigningAlgorithm) ? _keys.Algorithm : opts.SigningAlgorithm;

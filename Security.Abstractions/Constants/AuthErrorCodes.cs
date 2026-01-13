@@ -13,6 +13,7 @@ public static class AuthErrorCodes
     public const string ExpiredToken = "expired_token";
     public const string RevokedToken = "revoked_token";
     public const string TokenExpired = "token_expired";
+    public const string TokenNotYetValid = "token_not_yet_valid";
     public const string TokenRevoked = "token_revoked";
     public const string TokenVersionMismatch = "token_version_mismatch";
     public const string RefreshTokenReuseDetected = "refresh_token_reuse_detected";

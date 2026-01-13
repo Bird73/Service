@@ -37,6 +37,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
 
+// Central clock (overridable in tests)
+builder.Services.AddSingleton(TimeProvider.System);
+
 // Error log (jsonl): auth-error-yyyyMMdd.jsonl
 builder.Services.AddBirdsoftJsonLogging(o =>
 {

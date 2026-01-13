@@ -26,6 +26,7 @@ public sealed class RepositoryTokenService : ITokenService
     private readonly IRefreshTokenRepository _refresh;
     private readonly IAccessTokenDenylistStore _denylist;
     private readonly ISessionStore _sessions;
+    private readonly TimeProvider _time;
 
     public RepositoryTokenService(
         IOptionsMonitor<JwtOptions> jwtOptions,
@@ -38,7 +39,8 @@ public sealed class RepositoryTokenService : ITokenService
         ISubjectRepository subjects,
         IRefreshTokenRepository refresh,
         IAccessTokenDenylistStore denylist,
-        ISessionStore sessions)
+        ISessionStore sessions,
+        TimeProvider? timeProvider = null)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
@@ -51,6 +53,7 @@ public sealed class RepositoryTokenService : ITokenService
         _refresh = refresh;
         _denylist = denylist;
         _sessions = sessions;
+        _time = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
@@ -94,11 +97,19 @@ public sealed class RepositoryTokenService : ITokenService
             return AccessTokenValidationResult.Fail("invalid_token");
         }
 
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var skew = opts.ClockSkewSeconds;
+        var now = _time.GetUtcNow().ToUnixTimeSeconds();
+
+        // nbf not reached => fail (allow within clock skew)
+        if (TryGetLong(root, "nbf", out var nbf) && nbf - skew > now)
+        {
+            return AccessTokenValidationResult.Fail(AuthErrorCodes.TokenNotYetValid);
+        }
+
+        // exp passed => fail (deterministic boundary rule: valid if now <= exp + skew)
         if (exp + skew < now)
         {
-            return AccessTokenValidationResult.Fail("expired_token");
+            return AccessTokenValidationResult.Fail(AuthErrorCodes.TokenExpired);
         }
 
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
@@ -219,12 +230,12 @@ public sealed class RepositoryTokenService : ITokenService
         var subject = await _subjects.FindAsync(tenantId, ourSubject, cancellationToken)
             ?? await _subjects.CreateAsync(tenantId, ourSubject, cancellationToken);
 
-        var sessionId = await _sessions.CreateSessionAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken);
+        var sessionId = await _sessions.CreateSessionAsync(tenantId, ourSubject, _time.GetUtcNow(), cancellationToken);
         var jti = Guid.NewGuid().ToString("N");
         var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, tenant.TokenVersion, subject.TokenVersion, roles, scopes);
 
         var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
-        var refreshExpires = DateTimeOffset.UtcNow.AddDays(Math.Max(1, opts.RefreshTokenDays));
+        var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
         var refreshHash = HashRefreshToken(refreshToken);
         _ = await _refresh.CreateAsync(
             tenantId,
@@ -251,7 +262,7 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail("invalid_refresh_token");
         }
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         var tokenHash = HashRefreshToken(refreshToken);
         var dto = await _refresh.FindByHashAsync(tokenHash, cancellationToken);
         if (dto is null)
@@ -366,8 +377,9 @@ public sealed class RepositoryTokenService : ITokenService
             return RevokeResult.Fail("forbidden");
         }
 
-        var ok = await _refresh.RevokeAsync(tenantId, ourSubject, tokenHash, DateTimeOffset.UtcNow, cancellationToken: cancellationToken);
-        _ = await _sessions.TerminateSessionAsync(tenantId, dto.SessionId, DateTimeOffset.UtcNow, reason: "refresh_revoke", cancellationToken);
+        var now = _time.GetUtcNow();
+        var ok = await _refresh.RevokeAsync(tenantId, ourSubject, tokenHash, now, cancellationToken: cancellationToken);
+        _ = await _sessions.TerminateSessionAsync(tenantId, dto.SessionId, now, reason: "refresh_revoke", cancellationToken);
         return ok ? RevokeResult.Success() : RevokeResult.Fail("revoke_failed");
     }
 
@@ -376,8 +388,9 @@ public sealed class RepositoryTokenService : ITokenService
 
     private async Task<int> RevokeAllCoreAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken)
     {
-        _ = await _sessions.TerminateAllAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, reason: "revoke_all", cancellationToken);
-        return await _refresh.RevokeAllBySubjectAsync(tenantId, ourSubject, DateTimeOffset.UtcNow, cancellationToken);
+        var now = _time.GetUtcNow();
+        _ = await _sessions.TerminateAllAsync(tenantId, ourSubject, now, reason: "revoke_all", cancellationToken);
+        return await _refresh.RevokeAllBySubjectAsync(tenantId, ourSubject, now, cancellationToken);
     }
 
     private string CreateAccessToken(
@@ -391,7 +404,7 @@ public sealed class RepositoryTokenService : ITokenService
         IReadOnlyList<string>? roles,
         IReadOnlyList<string>? scopes)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = _time.GetUtcNow();
         var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
 
         var signing = ResolveSigningKey(opts);
