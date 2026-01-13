@@ -1,4 +1,4 @@
-﻿namespace Birdsoft.Security.Authorization.Tests.Unit;
+namespace Birdsoft.Security.Authorization.Tests.Unit;
 
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authorization.Evaluation;

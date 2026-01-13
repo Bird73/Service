@@ -96,6 +96,11 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
                 services.RemoveAll<ISessionStore>();
                 services.RemoveAll<ITokenService>();
 
+                // Program.cs registers InMemoryTokenService as a concrete singleton in non-EF mode.
+                // When integration tests force EF-backed services, that singleton would end up
+                // consuming scoped EF services (via ISessionStore), which fails DI validation.
+                services.RemoveAll<Birdsoft.Security.Authentication.InMemoryTokenService>();
+
                 services.RemoveAll<IAuthStateRepository>();
                 services.RemoveAll<IRefreshTokenRepository>();
                 services.RemoveAll<IExternalIdentityRepository>();

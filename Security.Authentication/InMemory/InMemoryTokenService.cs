@@ -3,6 +3,7 @@ namespace Birdsoft.Security.Authentication;
 using Birdsoft.Security.Abstractions;
 using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Options;
+using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authentication.Jwt;
@@ -13,7 +14,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-public sealed class InMemoryTokenService : ITokenService
+public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistStore
 {
     private sealed record RefreshRecord(
         Guid TenantId,
@@ -31,7 +32,7 @@ public sealed class InMemoryTokenService : ITokenService
     private readonly IJwtKeyProvider _keys;
     private readonly ISessionStore _sessions;
     private readonly ConcurrentDictionary<string, RefreshRecord> _refresh = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<(Guid TenantId, string Jti), byte> _revokedJti = new();
+    private readonly ConcurrentDictionary<(Guid TenantId, string Jti), DateTimeOffset> _revokedJti = new();
 
     public InMemoryTokenService(
         IOptionsMonitor<JwtOptions> jwtOptions,
@@ -148,6 +149,16 @@ public sealed class InMemoryTokenService : ITokenService
             return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token"));
         }
 
+        if (_revokedJti.TryGetValue((tenantId, jti), out var revokedUntil))
+        {
+            if (revokedUntil > DateTimeOffset.UtcNow)
+            {
+                return Task.FromResult(AccessTokenValidationResult.Fail("revoked_token"));
+            }
+
+            _revokedJti.TryRemove((tenantId, jti), out _);
+        }
+
         if (TryGetString(root, SecurityClaimTypes.SessionId, out var sessionRaw)
             && Guid.TryParse(sessionRaw, out var sessionId))
         {
@@ -166,8 +177,42 @@ public sealed class InMemoryTokenService : ITokenService
 
     public Task<bool> IsJtiRevokedAsync(Guid tenantId, string jti, CancellationToken cancellationToken = default)
     {
+        return ContainsAsync(tenantId, jti, cancellationToken);
+    }
+
+    public Task AddAsync(Guid tenantId, string jti, DateTimeOffset expiresAt, CancellationToken cancellationToken = default)
+    {
         _ = cancellationToken;
-        return Task.FromResult(_revokedJti.ContainsKey((tenantId, jti)));
+        if (tenantId == Guid.Empty || string.IsNullOrWhiteSpace(jti))
+        {
+            return Task.CompletedTask;
+        }
+
+        // Store until the token expires; ValidateAccessTokenAsync treats it as revoked if now < expiresAt.
+        _revokedJti[(tenantId, jti)] = expiresAt;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> ContainsAsync(Guid tenantId, string jti, CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        if (tenantId == Guid.Empty || string.IsNullOrWhiteSpace(jti))
+        {
+            return Task.FromResult(false);
+        }
+
+        if (!_revokedJti.TryGetValue((tenantId, jti), out var until))
+        {
+            return Task.FromResult(false);
+        }
+
+        if (until <= DateTimeOffset.UtcNow)
+        {
+            _revokedJti.TryRemove((tenantId, jti), out _);
+            return Task.FromResult(false);
+        }
+
+        return Task.FromResult(true);
     }
 
     public Task<TokenPair> GenerateTokensAsync(

@@ -67,17 +67,18 @@ public sealed class EfExternalIdentityRepository : IExternalIdentityRepository
         string? reason = null,
         CancellationToken cancellationToken = default)
     {
-        var affected = await _db.ExternalIdentities
-            .Where(x => x.TenantId == tenantId
-                        && x.Provider == provider
-                        && x.Issuer == issuer
-                        && x.ProviderSub == providerSub
-                        && x.Enabled)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.Enabled, false)
-                .SetProperty(x => x.DisabledAt, disabledAt)
-                .SetProperty(x => x.DisabledReason, reason),
-                cancellationToken);
+        // Use raw SQL to avoid provider translation gaps while keeping the update atomic.
+        var affected = await _db.Database.ExecuteSqlInterpolatedAsync(
+            $@"UPDATE external_identities
+SET Enabled = 0,
+    DisabledAt = {disabledAt},
+    DisabledReason = {reason}
+WHERE TenantId = {tenantId}
+  AND Provider = {provider}
+  AND Issuer = {issuer}
+  AND ProviderSub = {providerSub}
+  AND Enabled = 1;",
+            cancellationToken);
 
         return affected == 1;
     }

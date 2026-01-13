@@ -157,7 +157,9 @@ else
     builder.Services.AddSingleton<ITenantRepository, InMemoryTenantRepository>();
     builder.Services.AddSingleton<ISubjectRepository, InMemorySubjectRepository>();
     builder.Services.AddSingleton<ISessionStore, InMemorySessionStore>();
-    builder.Services.AddSingleton<ITokenService, InMemoryTokenService>();
+    builder.Services.AddSingleton<InMemoryTokenService>();
+    builder.Services.AddSingleton<ITokenService>(sp => sp.GetRequiredService<InMemoryTokenService>());
+    builder.Services.AddSingleton<Birdsoft.Security.Abstractions.Repositories.IAccessTokenDenylistStore>(sp => sp.GetRequiredService<InMemoryTokenService>());
 }
 
 builder.Services.AddScoped<IAuditEventWriter, ResilientAuditEventWriter>();
@@ -869,7 +871,7 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
         : Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "invalid_refresh_token"), statusCode: StatusCodes.Status401Unauthorized);
 }
 
-static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, IAuditEventWriter audit, CancellationToken ct)
+static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, [Microsoft.AspNetCore.Mvc.FromServices] Birdsoft.Security.Abstractions.Repositories.IAccessTokenDenylistStore denylist, IAuditEventWriter audit, CancellationToken ct)
 {
     var bearer = TryGetBearerToken(http);
     if (string.IsNullOrWhiteSpace(bearer))
@@ -929,6 +931,22 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
 
     var tenantId = validation.TenantId.Value;
     var ourSubject = validation.OurSubject.Value;
+
+    // Optional immediate invalidation: add current access token jti to denylist until exp.
+    try
+    {
+        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(bearer);
+        var jti = jwt.Claims.FirstOrDefault(c => string.Equals(c.Type, Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Jti, StringComparison.Ordinal))?.Value;
+        var expRaw = jwt.Claims.FirstOrDefault(c => string.Equals(c.Type, "exp", StringComparison.Ordinal))?.Value;
+        if (!string.IsNullOrWhiteSpace(jti) && long.TryParse(expRaw, out var expSeconds))
+        {
+            var expiresAt = DateTimeOffset.FromUnixTimeSeconds(expSeconds);
+            await denylist.AddAsync(tenantId, jti, expiresAt, ct);
+        }
+    }
+    catch
+    {
+    }
 
     if (request.AllDevices)
     {

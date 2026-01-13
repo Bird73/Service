@@ -40,26 +40,30 @@ public sealed class EfAuthStateRepository : IAuthStateRepository
     {
         var now = DateTimeOffset.UtcNow;
 
-        var affected = await _db.AuthStates
-            .Where(x => x.State == state
-                        && x.UsedAt == null
-                        && x.ExpiresAt > now
-                        && x.CodeVerifier == null
-                        && x.Nonce == null)
-            .ExecuteUpdateAsync(
-                s => s
-                    .SetProperty(x => x.CodeVerifier, codeVerifier)
-                    .SetProperty(x => x.Nonce, nonce),
-                cancellationToken);
+        // Use raw SQL for an atomic update that works across providers.
+        var affected = await _db.Database.ExecuteSqlInterpolatedAsync(
+            $@"UPDATE auth_states
+SET CodeVerifier = {codeVerifier}, Nonce = {nonce}
+WHERE State = {state}
+  AND UsedAt IS NULL
+  AND ExpiresAt > {now}
+  AND CodeVerifier IS NULL
+  AND Nonce IS NULL;",
+            cancellationToken);
 
         return affected == 1;
     }
 
     public async Task<bool> TryConsumeAsync(string state, DateTimeOffset usedAt, CancellationToken cancellationToken = default)
     {
-        var affected = await _db.AuthStates
-            .Where(x => x.State == state && x.UsedAt == null && x.ExpiresAt > usedAt)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.UsedAt, usedAt), cancellationToken);
+        // Use raw SQL for an atomic update that works across providers.
+        var affected = await _db.Database.ExecuteSqlInterpolatedAsync(
+            $@"UPDATE auth_states
+SET UsedAt = {usedAt}
+WHERE State = {state}
+  AND UsedAt IS NULL
+  AND ExpiresAt > {usedAt};",
+            cancellationToken);
 
         return affected == 1;
     }
@@ -85,9 +89,10 @@ public sealed class EfAuthStateRepository : IAuthStateRepository
 
     public async Task<int> DeleteExpiredOrUsedAsync(DateTimeOffset now, CancellationToken cancellationToken = default)
     {
-        return await _db.AuthStates
-            .Where(x => x.ExpiresAt <= now || x.UsedAt != null)
-            .ExecuteDeleteAsync(cancellationToken);
+        // Use raw SQL to avoid provider translation gaps.
+        return await _db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM auth_states WHERE ExpiresAt <= {now} OR UsedAt IS NOT NULL;",
+            cancellationToken);
     }
 
     private static AuthStateDto ToDto(AuthStateEntity entity)
