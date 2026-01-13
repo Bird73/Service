@@ -98,7 +98,7 @@ public sealed class GovernanceSessionInvalidationTests
 
         await sessions.TerminateSessionAsync(tenantId, sessionId!.Value, DateTimeOffset.UtcNow, reason: "test");
 
-        var refreshed = await tokens.RefreshAsync(pair.RefreshToken);
+        var refreshed = await tokens.RefreshAsync(tenantId, pair.RefreshToken);
         Assert.False(refreshed.Succeeded);
         Assert.Equal("session_terminated", refreshed.ErrorCode);
     }
@@ -183,7 +183,7 @@ public sealed class GovernanceSessionInvalidationTests
         var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
         _ = await tenants.UpdateStatusAsync(tenantId, TenantStatus.Suspended);
 
-        var refreshed = await tokens.RefreshAsync(pair.RefreshToken);
+        var refreshed = await tokens.RefreshAsync(tenantId, pair.RefreshToken);
         Assert.False(refreshed.Succeeded);
         Assert.Equal("tenant_suspended", refreshed.ErrorCode);
     }
@@ -203,7 +203,7 @@ public sealed class GovernanceSessionInvalidationTests
         var pair = await tokens.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
         _ = await subjects.UpdateStatusAsync(tenantId, ourSubject, UserStatus.Disabled);
 
-        var refreshed = await tokens.RefreshAsync(pair.RefreshToken);
+        var refreshed = await tokens.RefreshAsync(tenantId, pair.RefreshToken);
         Assert.False(refreshed.Succeeded);
         Assert.Equal("user_disabled", refreshed.ErrorCode);
     }

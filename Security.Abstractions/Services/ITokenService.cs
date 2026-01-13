@@ -34,6 +34,7 @@ public interface ITokenService
     /// 使用 Refresh Token 換發新的 Token Pair（含 rotation）
     /// </summary>
     Task<RefreshResult> RefreshAsync(
+        Guid tenantId,
         string refreshToken,
         CancellationToken cancellationToken = default);
 

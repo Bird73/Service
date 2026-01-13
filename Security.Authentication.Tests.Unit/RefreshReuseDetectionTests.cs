@@ -28,12 +28,12 @@ public sealed class RefreshReuseDetectionTests
         Assert.True(Guid.TryParse(sessionIdRaw, out var sessionId));
 
         // First refresh rotates the refresh token.
-        var rotated = await tokenService.RefreshAsync(first.RefreshToken);
+        var rotated = await tokenService.RefreshAsync(tenantId, first.RefreshToken);
         Assert.True(rotated.Succeeded);
         Assert.NotNull(rotated.Tokens);
 
         // Reuse the old refresh token should trigger reuse detection and terminate the session.
-        var reused = await tokenService.RefreshAsync(first.RefreshToken);
+        var reused = await tokenService.RefreshAsync(tenantId, first.RefreshToken);
         Assert.False(reused.Succeeded);
         Assert.Equal(AuthErrorCodes.RefreshTokenReuseDetected, reused.ErrorCode);
 

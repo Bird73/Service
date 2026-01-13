@@ -819,7 +819,9 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
             statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var result = await tokens.RefreshAsync(request.RefreshToken, ct);
+    // Tenant comes from header for refresh (no JWT claim on this endpoint).
+    var tenant = http.GetTenantContext();
+    var result = await tokens.RefreshAsync(tenant.TenantId, request.RefreshToken, ct);
     if (!result.Succeeded)
     {
         await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
@@ -1176,6 +1178,30 @@ static async Task<IResult> OidcCallback(
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
+        return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    // Optional hardening: if callers provide X-Tenant-Id, it must match the state-bound tenant.
+    // Real OIDC provider callbacks won't include this header; those should continue to work.
+    if (http.Request.Headers.TryGetValue("X-Tenant-Id", out var tenantHeader)
+        && Guid.TryParse(tenantHeader.ToString(), out var headerTenantId)
+        && headerTenantId != ctx.TenantId)
+    {
+        await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
+        {
+            Id = Guid.NewGuid(),
+            OccurredAt = DateTimeOffset.UtcNow,
+            TenantId = headerTenantId,
+            Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
+            Outcome = "fail",
+            Code = "invalid_state",
+            CorrelationId = http.GetCorrelationId(),
+            TraceId = http.GetTraceId(),
+            Ip = ip,
+            UserAgent = http.Request.Headers.UserAgent.ToString(),
+        }, ct);
+
+        // Avoid leaking which tenant a state belongs to.
         return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
     }
 

@@ -2,6 +2,7 @@ namespace Birdsoft.Security.Authentication.Tenancy;
 
 using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Services;
 using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
 
@@ -9,11 +10,13 @@ public sealed class TenantResolutionMiddleware : IMiddleware
 {
     private readonly ITenantResolver _resolver;
     private readonly TenantContextAccessor _accessor;
+    private readonly ITokenService _tokens;
 
-    public TenantResolutionMiddleware(ITenantResolver resolver, TenantContextAccessor accessor)
+    public TenantResolutionMiddleware(ITenantResolver resolver, TenantContextAccessor accessor, ITokenService tokens)
     {
         _resolver = resolver;
         _accessor = accessor;
+        _tokens = tokens;
     }
 
     public async Task InvokeAsync(HttpContext context, RequestDelegate next)
@@ -41,6 +44,25 @@ public sealed class TenantResolutionMiddleware : IMiddleware
             return;
         }
 
+        // If the tenant header is missing, allow tenant resolution from a valid bearer token.
+        // This supports the "tenant_id claim" path without relying on JwtBearer to populate HttpContext.User.
+        if (RequiresTenant(context.Request.Path))
+        {
+            var bearer = TryGetBearerToken(context);
+            if (!string.IsNullOrWhiteSpace(bearer))
+            {
+                var validation = await _tokens.ValidateAccessTokenAsync(bearer, context.RequestAborted);
+                if (validation.Succeeded && validation.TenantId is Guid tid && tid != Guid.Empty)
+                {
+                    var ctx = new TenantContext(tid, TenantResolutionSource.TokenClaim);
+                    _accessor.Current = ctx;
+                    context.SetTenantContext(ctx);
+                    await next(context);
+                    return;
+                }
+            }
+        }
+
         // For auth endpoints, tenant is required (header or token claim). Missing tenant must not become 500.
         if (RequiresTenant(context.Request.Path))
         {
@@ -51,6 +73,22 @@ public sealed class TenantResolutionMiddleware : IMiddleware
         }
 
         await next(context);
+    }
+
+    private static string? TryGetBearerToken(HttpContext context)
+    {
+        var header = context.Request.Headers.Authorization.ToString();
+        if (string.IsNullOrWhiteSpace(header))
+        {
+            return null;
+        }
+
+        if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return header["Bearer ".Length..].Trim();
     }
 
     private static bool RequiresTenant(PathString path)

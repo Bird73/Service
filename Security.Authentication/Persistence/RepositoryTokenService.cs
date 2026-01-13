@@ -244,7 +244,7 @@ public sealed class RepositoryTokenService : ITokenService
         };
     }
 
-    public async Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken cancellationToken = default)
+    public async Task<RefreshResult> RefreshAsync(Guid tenantId, string refreshToken, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(refreshToken))
         {
@@ -257,6 +257,12 @@ public sealed class RepositoryTokenService : ITokenService
         if (dto is null)
         {
             return RefreshResult.Fail("invalid_refresh_token");
+        }
+
+        // Tenant hardening: refresh token must be used under the same tenant context.
+        if (dto.TenantId != tenantId)
+        {
+            return RefreshResult.Fail("invalid_tenant");
         }
 
         // refresh token reuse detection (rotation): old token used again => revoke whole session

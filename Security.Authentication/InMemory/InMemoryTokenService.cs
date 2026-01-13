@@ -242,13 +242,19 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         });
     }
 
-    public Task<RefreshResult> RefreshAsync(string refreshToken, CancellationToken cancellationToken = default)
+    public Task<RefreshResult> RefreshAsync(Guid tenantId, string refreshToken, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
         var tokenHash = HashRefreshToken(refreshToken);
         if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
             return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
+        }
+
+        // Tenant hardening: refresh token must be used under the same tenant context.
+        if (rec.TenantId != tenantId)
+        {
+            return Task.FromResult(RefreshResult.Fail("invalid_tenant"));
         }
 
         if (!_sessions.IsSessionActiveAsync(rec.TenantId, rec.SessionId, cancellationToken).GetAwaiter().GetResult())

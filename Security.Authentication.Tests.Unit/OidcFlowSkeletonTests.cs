@@ -81,8 +81,8 @@ public sealed class OidcFlowSkeletonTests
         var first = await tokenService.GenerateTokensAsync(tenantId, ourSubject, roles: [], scopes: []);
 
         // When
-        var refreshed = await tokenService.RefreshAsync(first.RefreshToken);
-        var reused = await tokenService.RefreshAsync(first.RefreshToken);
+        var refreshed = await tokenService.RefreshAsync(tenantId, first.RefreshToken);
+        var reused = await tokenService.RefreshAsync(tenantId, first.RefreshToken);
 
         // Then
         Assert.True(refreshed.Succeeded);
