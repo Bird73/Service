@@ -318,9 +318,7 @@ public sealed class TokenRefreshContractTests
                 string.Equals(failBody.Error!.Code, "revoked_refresh_token", StringComparison.Ordinal)
                 || string.Equals(failBody.Error.Code, Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected, StringComparison.Ordinal));
 
-            // Session behavior is policy-dependent:
-            // - If the concurrent loser is treated as a normal revoked token, session should remain active.
-            // - If treated as reuse attack, session may be terminated (and the newly issued refresh may become unusable).
+            // Session behavior depends on whether the loser observed a rotated token (reuse detection) or lost the rotate transaction.
             var revokeReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/token/revoke")
             {
                 Content = JsonContent.Create(new TokenRevokeRequest(RefreshToken: null, AllDevices: false)),
@@ -345,8 +343,8 @@ public sealed class TokenRefreshContractTests
             }
             else
             {
-                // If treated as reuse attack, session may be terminated.
-                // Attempting to use the newly issued refresh token may also fail due to session termination.
+                // If the loser observed a rotated token, it's treated as reuse attack and session may be terminated.
+                // Attempting to use the newly issued refresh token may fail due to session termination.
                 var res2 = await PostRefreshAsync(client, tenantId, okBody.Data.RefreshToken);
                 Assert.Equal(HttpStatusCode.Unauthorized, res2.StatusCode);
 

@@ -208,12 +208,21 @@ sequenceDiagram
             TS->>DB: UPDATE RefreshToken SET revoked_at=now
             TS-->>API: RefreshResult.Fail("token_version_mismatch")
             API-->>C: 401 Unauthorized (re-login required)
-        else Version OK - Rotate token
-            TS->>DB: UPDATE RefreshToken SET revoked_at=now, replaced_by=new_id
-            TS->>DB: INSERT RefreshToken (new hash, new expires_at)
+        else Version OK - Rotate token (atomic)
+            note over TS,DB: rotation 必須同交易，避免併發 refresh 造成雙花（double-mint）
+            TS->>DB: BEGIN TRANSACTION
+            TS->>DB: INSERT RefreshToken (new_id, new hash, expires_at)
+            TS->>DB: UPDATE RefreshToken SET revoked_at=now, replaced_by=new_id WHERE revoked_at IS NULL
+            alt update affected = 0 (lost race)
+                TS->>DB: ROLLBACK
+                TS-->>API: RefreshResult.Fail("revoked_refresh_token")
+                API-->>C: 401 Unauthorized (revoked_refresh_token)
+            else update affected = 1
+                TS->>DB: COMMIT
             TS->>TS: GenerateAccessToken(tenant_id, our_subject, tenant_tv, subject_tv)
             TS-->>API: TokenPair {new access_token, new refresh_token}
             API-->>C: 200 OK {access_token, refresh_token, expires_in}
+            end
         end
     end
 ```

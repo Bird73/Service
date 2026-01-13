@@ -120,6 +120,8 @@ state 儲存要求：
 - 只存 hash（不可明碼存 DB）
 - 可撤銷：單顆撤銷、撤銷所有 subject 的 refresh、撤銷 tenant 全部 refresh
 - 支援 rotation（refresh 時換發新 refresh，舊的標記 replaced/revoked）
+- rotation 必須同交易（atomic）：避免併發 refresh 造成雙花；併發輸家可能回 `revoked_refresh_token`（單純失敗）或 `refresh_token_reuse_detected`（若讀到已 rotation 的舊 token，視策略可能終止 session）
+- rotation 後舊 refresh token 再次被使用（`replaced_by` != null）視為可能被竊：回 `refresh_token_reuse_detected` 並終止 session（要求重新登入）
 
 ### 6.3 強制重新登入（tenant/user 等級）
 

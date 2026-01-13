@@ -62,10 +62,17 @@
 - Body：`{ refreshToken }`
 - 行為：驗證 refresh token、token_version、rotation；回傳新 access/refresh
 
+補充（併發與 rotation 行為）：
+- 同一顆 refresh token 併發呼叫 `/token/refresh` 時，只允許其中一個成功；另一個回 `401`。
+	- 若輸家發生在「同交易 rotation 競態」：回 `revoked_refresh_token`（防雙花；通常不終止 session）。
+	- 若輸家讀到「已 rotation 的舊 token」（`replaced_by` != null）：可能視為 reuse attack，回 `refresh_token_reuse_detected` 並終止 session（要求重新登入）。
+- rotation 後舊 refresh token（`replaced_by` != null）再次被使用，視為可能被竊，回 `401` + `refresh_token_reuse_detected`，並終止該 session（要求重新登入）。
+
 常見錯誤（`401`）：
 - `invalid_refresh_token`
 - `revoked_refresh_token`
 - `expired_refresh_token`
+- `refresh_token_reuse_detected`
 - `session_terminated`
 - `tenant_suspended` / `tenant_archived`
 - `user_disabled` / `user_locked`
