@@ -2,6 +2,7 @@ namespace Birdsoft.Security.Authentication.Tenancy;
 
 using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Services;
 using Microsoft.AspNetCore.Http;
 using System.Security.Claims;
@@ -68,7 +69,7 @@ public sealed class TenantResolutionMiddleware : IMiddleware
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsJsonAsync(ApiResponse<object>.Fail("invalid_request", "X-Tenant-Id (or tenant_id claim) is required"));
+            await context.Response.WriteAsJsonAsync(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "X-Tenant-Id (or tenant_id claim) is required"));
             return;
         }
 

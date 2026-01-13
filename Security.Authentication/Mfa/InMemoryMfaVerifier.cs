@@ -1,5 +1,6 @@
 namespace Birdsoft.Security.Authentication.Mfa;
 
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Mfa;
 
 /// <summary>
@@ -17,6 +18,6 @@ public sealed class InMemoryMfaVerifier : IMfaVerifier
         // Intentionally simple: accept a single static code.
         return Task.FromResult(code == "123456"
             ? new MfaVerifyResult(true)
-            : new MfaVerifyResult(false, "mfa_failed"));
+            : new MfaVerifyResult(false, AuthErrorCodes.MfaFailed));
     }
 }

@@ -2,6 +2,7 @@ using Birdsoft.Security.Abstractions;
 using Birdsoft.Security.Abstractions.Audit;
 using Birdsoft.Security.Abstractions.Contracts.Auth;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Mfa;
 using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Observability.Correlation;
@@ -323,7 +324,7 @@ static async Task<IResult> PasswordLogin(
 
         return Results.Json(
             ApiResponse<object>.Fail(
-                "invalid_request",
+                AuthErrorCodes.InvalidRequest,
                 "username/password is required",
                 new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
                 {
@@ -343,14 +344,14 @@ static async Task<IResult> PasswordLogin(
             TenantId = tenant.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "tenant_not_active",
+            Code = AuthErrorCodes.TenantNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var decision = await bruteForce.CheckAsync(tenant.TenantId, request.Username, ip, ct);
@@ -444,14 +445,14 @@ static async Task<IResult> PasswordLogin(
             OurSubject = ourSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "user_not_active",
+            Code = AuthErrorCodes.UserNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.UserNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var policy = await mfaPolicy.GetPolicyAsync(tenant.TenantId, ourSubject, ct);
@@ -499,7 +500,7 @@ static async Task<IResult> PasswordLogin(
                     OurSubject = ourSubject,
                     Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
                     Outcome = "fail",
-                    Code = "mfa_unavailable",
+                    Code = AuthErrorCodes.MfaUnavailable,
                     Detail = ex.GetType().Name,
                     CorrelationId = http.GetCorrelationId(),
                     TraceId = http.GetTraceId(),
@@ -507,7 +508,7 @@ static async Task<IResult> PasswordLogin(
                     UserAgent = http.Request.Headers.UserAgent.ToString(),
                 }, ct);
 
-                return Results.Json(ApiResponse<object>.Fail("mfa_unavailable"), statusCode: StatusCodes.Status503ServiceUnavailable);
+                return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MfaUnavailable), statusCode: StatusCodes.Status503ServiceUnavailable);
             }
         }
     }
@@ -607,14 +608,14 @@ static async Task<IResult> MfaVerify(
             TenantId = tenant.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_request"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest), statusCode: StatusCodes.Status400BadRequest);
     }
 
     var challenge = await mfaChallenges.FindAsync(request.ChallengeId, ct);
@@ -627,14 +628,14 @@ static async Task<IResult> MfaVerify(
             TenantId = tenant.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "mfa_challenge_not_found",
+            Code = AuthErrorCodes.MfaChallengeNotFound,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("mfa_challenge_not_found"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MfaChallengeNotFound), statusCode: StatusCodes.Status400BadRequest);
     }
 
     if (challenge.TenantId != tenant.TenantId)
@@ -646,14 +647,14 @@ static async Task<IResult> MfaVerify(
             TenantId = tenant.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "tenant_mismatch",
+            Code = AuthErrorCodes.TenantMismatch,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("tenant_mismatch"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantMismatch), statusCode: StatusCodes.Status403Forbidden);
     }
 
     if (challenge.ExpiresAt <= DateTimeOffset.UtcNow)
@@ -668,14 +669,14 @@ static async Task<IResult> MfaVerify(
             OurSubject = challenge.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "mfa_expired",
+            Code = AuthErrorCodes.MfaExpired,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("mfa_expired"), statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MfaExpired), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     var tenantDto = await tenants.FindAsync(challenge.TenantId, ct);
@@ -689,14 +690,14 @@ static async Task<IResult> MfaVerify(
             OurSubject = challenge.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "tenant_not_active",
+            Code = AuthErrorCodes.TenantNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var subjectDto = await subjects.FindAsync(challenge.TenantId, challenge.OurSubject, ct);
@@ -730,19 +731,21 @@ static async Task<IResult> MfaVerify(
             OurSubject = challenge.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "user_not_active",
+            Code = AuthErrorCodes.UserNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.UserNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var verify = await mfaVerifier.VerifyAsync(challenge.TenantId, challenge.OurSubject, request.Code, ct);
     if (!verify.Succeeded)
     {
+        var errorCode = verify.ErrorCode ?? AuthErrorCodes.MfaFailed;
+
         await audit.WriteAsync(new Birdsoft.Security.Abstractions.Models.AuthEvent
         {
             Id = Guid.NewGuid(),
@@ -751,14 +754,14 @@ static async Task<IResult> MfaVerify(
             OurSubject = challenge.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = verify.ErrorCode ?? "mfa_failed",
+            Code = errorCode,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail(verify.ErrorCode ?? "mfa_failed"), statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Json(ApiResponse<object>.Fail(errorCode), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     var consumed = await mfaChallenges.ConsumeAsync(challenge.ChallengeId, ct);
@@ -772,14 +775,14 @@ static async Task<IResult> MfaVerify(
             OurSubject = challenge.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
             Outcome = "fail",
-            Code = "mfa_challenge_already_used",
+            Code = AuthErrorCodes.MfaChallengeAlreadyUsed,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("mfa_challenge_already_used"), statusCode: StatusCodes.Status409Conflict);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MfaChallengeAlreadyUsed), statusCode: StatusCodes.Status409Conflict);
     }
 
     var roles = await authzData.GetRolesAsync(challenge.TenantId, challenge.OurSubject, ct);
@@ -845,7 +848,7 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
@@ -853,7 +856,7 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
         }, ct);
 
         return Results.Json(
-            ApiResponse<object>.Fail("invalid_request", "refreshToken is required", SingleField("refreshToken", "required")),
+            ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "refreshToken is required", SingleField("refreshToken", "required")),
             statusCode: StatusCodes.Status400BadRequest);
     }
 
@@ -868,7 +871,7 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRefreshed,
             Outcome = "fail",
-            Code = result.ErrorCode ?? "invalid_refresh_token",
+            Code = result.ErrorCode ?? AuthErrorCodes.InvalidRefreshToken,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
@@ -908,7 +911,7 @@ static async Task<IResult> TokenRefresh(HttpContext http, RefreshRequest request
 
     return result.Succeeded && result.Tokens is not null
         ? Results.Json(ApiResponse<TokenPair>.Ok(result.Tokens))
-        : Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "invalid_refresh_token"), statusCode: StatusCodes.Status401Unauthorized);
+        : Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? AuthErrorCodes.InvalidRefreshToken), statusCode: StatusCodes.Status401Unauthorized);
 }
 
 static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest request, ITokenService tokens, [Microsoft.AspNetCore.Mvc.FromServices] Birdsoft.Security.Abstractions.Repositories.IAccessTokenDenylistStore denylist, IAuditEventWriter audit, CancellationToken ct)
@@ -922,14 +925,14 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
             Outcome = "fail",
-            Code = "missing_bearer_token",
+            Code = AuthErrorCodes.MissingBearerToken,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("missing_bearer_token"), statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MissingBearerToken), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     var validation = await tokens.ValidateAccessTokenAsync(bearer, ct);
@@ -941,14 +944,14 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
             Outcome = "fail",
-            Code = validation.ErrorCode ?? "invalid_token",
+            Code = validation.ErrorCode ?? AuthErrorCodes.InvalidToken,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail(validation.ErrorCode ?? "invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Json(ApiResponse<object>.Fail(validation.ErrorCode ?? AuthErrorCodes.InvalidToken), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     if (validation.TenantId is null || validation.OurSubject is null)
@@ -959,14 +962,14 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
             Outcome = "fail",
-            Code = "invalid_token",
+            Code = AuthErrorCodes.InvalidToken,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_token"), statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidToken), statusCode: StatusCodes.Status401Unauthorized);
     }
 
     var tenantId = validation.TenantId.Value;
@@ -1035,7 +1038,7 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             OurSubject = ourSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
@@ -1043,7 +1046,7 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
         }, ct);
 
         return Results.Json(
-            ApiResponse<object>.Fail("invalid_request", "refreshToken is required unless allDevices=true", SingleField("refreshToken", "required")),
+            ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "refreshToken is required unless allDevices=true", SingleField("refreshToken", "required")),
             statusCode: StatusCodes.Status400BadRequest);
     }
 
@@ -1062,14 +1065,14 @@ static async Task<IResult> TokenRevoke(HttpContext http, TokenRevokeRequest requ
             OurSubject = ourSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.TokenRevoked,
             Outcome = "fail",
-            Code = result.ErrorCode ?? "revoke_failed",
+            Code = result.ErrorCode ?? AuthErrorCodes.RevokeFailed,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString(),
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? "revoke_failed"), statusCode: status);
+        return Results.Json(ApiResponse<object>.Fail(result.ErrorCode ?? AuthErrorCodes.RevokeFailed), statusCode: status);
     }
 
     Guid? revokedSessionId = null;
@@ -1118,7 +1121,7 @@ static async Task<IResult> OidcChallenge(
     var tenantDto = await tenants.FindAsync(tenant.TenantId, ct);
     if (tenantDto is not null && tenantDto.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
     {
-        return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var opts = await registry.GetAsync(tenant.TenantId, provider, ct);
@@ -1171,7 +1174,7 @@ static async Task<IResult> OidcCallback(
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "oidc_error",
+            Code = AuthErrorCodes.OidcError,
             Detail = error,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
@@ -1179,7 +1182,7 @@ static async Task<IResult> OidcCallback(
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("oidc_error", error), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.OidcError, error), statusCode: StatusCodes.Status400BadRequest);
     }
 
     if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
@@ -1190,14 +1193,14 @@ static async Task<IResult> OidcCallback(
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_request", "Missing code/state"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "Missing code/state"), statusCode: StatusCodes.Status400BadRequest);
     }
 
     var ctx = await authState.ConsumeStateAsync(state, ct);
@@ -1209,14 +1212,14 @@ static async Task<IResult> OidcCallback(
             OccurredAt = DateTimeOffset.UtcNow,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "invalid_state",
+            Code = AuthErrorCodes.InvalidState,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidState), statusCode: StatusCodes.Status400BadRequest);
     }
 
     // Optional hardening: if callers provide X-Tenant-Id, it must match the state-bound tenant.
@@ -1232,7 +1235,7 @@ static async Task<IResult> OidcCallback(
             TenantId = headerTenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "invalid_state",
+            Code = AuthErrorCodes.InvalidState,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
@@ -1240,7 +1243,7 @@ static async Task<IResult> OidcCallback(
         }, ct);
 
         // Avoid leaking which tenant a state belongs to.
-        return Results.Json(ApiResponse<object>.Fail("invalid_state"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidState), statusCode: StatusCodes.Status400BadRequest);
     }
 
     var tenantDto = await tenants.FindAsync(ctx.TenantId, ct);
@@ -1253,14 +1256,14 @@ static async Task<IResult> OidcCallback(
             TenantId = ctx.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "tenant_not_active",
+            Code = AuthErrorCodes.TenantNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var enabled = await oidc.IsTenantProviderEnabledAsync(ctx.TenantId, provider, ct);
@@ -1273,14 +1276,14 @@ static async Task<IResult> OidcCallback(
             TenantId = ctx.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "provider_not_enabled",
+            Code = AuthErrorCodes.ProviderNotEnabled,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("provider_not_enabled"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.ProviderNotEnabled), statusCode: StatusCodes.Status403Forbidden);
     }
 
     OidcUserInfo userInfo;
@@ -1297,7 +1300,7 @@ static async Task<IResult> OidcCallback(
             TenantId = ctx.TenantId,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "oidc_exchange_failed",
+            Code = AuthErrorCodes.OidcExchangeFailed,
             Detail = ex.GetType().Name,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
@@ -1305,7 +1308,7 @@ static async Task<IResult> OidcCallback(
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("oidc_exchange_failed"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.OidcExchangeFailed), statusCode: StatusCodes.Status400BadRequest);
     }
 
     var key = new Birdsoft.Security.Abstractions.Identity.ExternalIdentityKey(ctx.TenantId, provider, userInfo.Issuer, userInfo.ProviderSub);
@@ -1321,14 +1324,14 @@ static async Task<IResult> OidcCallback(
             OurSubject = mapping.OurSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "external_identity_disabled",
+            Code = AuthErrorCodes.ExternalIdentityDisabled,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("external_identity_disabled"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.ExternalIdentityDisabled), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var ourSubject = mapping?.OurSubject ?? await provisioner.ProvisionAsync(ctx.TenantId, key, userInfo, ct);
@@ -1344,14 +1347,14 @@ static async Task<IResult> OidcCallback(
             OurSubject = ourSubject,
             Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Authentication,
             Outcome = "fail",
-            Code = "user_not_active",
+            Code = AuthErrorCodes.UserNotActive,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.UserNotActive), statusCode: StatusCodes.Status403Forbidden);
     }
 
     if (mapping is null)
@@ -1410,14 +1413,14 @@ static async Task<IResult> OidcCallback(
                     OurSubject = ourSubject,
                     Type = Birdsoft.Security.Abstractions.Models.AuthEventType.Mfa,
                     Outcome = "fail",
-                    Code = "mfa_unavailable",
+                    Code = AuthErrorCodes.MfaUnavailable,
                     Detail = ex.GetType().Name,
                     CorrelationId = http.GetCorrelationId(),
                     TraceId = http.GetTraceId(),
                     Ip = ip,
                     UserAgent = http.Request.Headers.UserAgent.ToString(),
                 }, ct);
-                return Results.Json(ApiResponse<object>.Fail("mfa_unavailable"), statusCode: StatusCodes.Status503ServiceUnavailable);
+                return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.MfaUnavailable), statusCode: StatusCodes.Status503ServiceUnavailable);
             }
         }
     }

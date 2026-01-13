@@ -193,14 +193,14 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
             OurSubject = request.OurSubject,
             Type = AuthEventType.Authorization,
             Outcome = "fail",
-            Code = "tenant_mismatch",
+            Code = AuthErrorCodes.TenantMismatch,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("tenant_mismatch"), statusCode: StatusCodes.Status403Forbidden);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantMismatch), statusCode: StatusCodes.Status403Forbidden);
     }
 
     var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
@@ -213,14 +213,14 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
             OccurredAt = DateTimeOffset.UtcNow,
             Type = AuthEventType.Authorization,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_request"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest), statusCode: StatusCodes.Status400BadRequest);
     }
 
     if (string.IsNullOrWhiteSpace(request.Resource) || string.IsNullOrWhiteSpace(request.Action))
@@ -233,14 +233,14 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
             OurSubject = request.OurSubject,
             Type = AuthEventType.Authorization,
             Outcome = "fail",
-            Code = "invalid_request",
+            Code = AuthErrorCodes.InvalidRequest,
             CorrelationId = http.GetCorrelationId(),
             TraceId = http.GetTraceId(),
             Ip = ip,
             UserAgent = http.Request.Headers.UserAgent.ToString(),
         }, ct);
 
-        return Results.Json(ApiResponse<object>.Fail("invalid_request"), statusCode: StatusCodes.Status400BadRequest);
+        return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest), statusCode: StatusCodes.Status400BadRequest);
     }
 
     var tenants = http.RequestServices.GetService<Birdsoft.Security.Abstractions.Repositories.ITenantRepository>();
@@ -257,14 +257,14 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
                 OurSubject = request.OurSubject,
                 Type = AuthEventType.Authorization,
                 Outcome = "fail",
-                Code = "tenant_not_active",
+                Code = AuthErrorCodes.TenantNotActive,
                 CorrelationId = http.GetCorrelationId(),
                 TraceId = http.GetTraceId(),
                 Ip = ip,
                 UserAgent = http.Request.Headers.UserAgent.ToString(),
             }, ct);
 
-            return Results.Json(ApiResponse<object>.Fail("tenant_not_active"), statusCode: StatusCodes.Status403Forbidden);
+            return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.TenantNotActive), statusCode: StatusCodes.Status403Forbidden);
         }
     }
 
@@ -282,14 +282,14 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
                 OurSubject = request.OurSubject,
                 Type = AuthEventType.Authorization,
                 Outcome = "fail",
-                Code = "user_not_active",
+                Code = AuthErrorCodes.UserNotActive,
                 CorrelationId = http.GetCorrelationId(),
                 TraceId = http.GetTraceId(),
                 Ip = ip,
                 UserAgent = http.Request.Headers.UserAgent.ToString(),
             }, ct);
 
-            return Results.Json(ApiResponse<object>.Fail("user_not_active"), statusCode: StatusCodes.Status403Forbidden);
+            return Results.Json(ApiResponse<object>.Fail(AuthErrorCodes.UserNotActive), statusCode: StatusCodes.Status403Forbidden);
         }
     }
 

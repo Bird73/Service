@@ -2,6 +2,7 @@ namespace Birdsoft.Security.Authentication.Observability.Logging;
 
 using Birdsoft.Infrastructure.Logging.Abstractions;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Observability.Correlation;
 using Microsoft.AspNetCore.Http;
 using System.Net;
@@ -54,7 +55,7 @@ public sealed class AuthErrorLoggingMiddleware
             http.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
             http.Response.ContentType = "application/json";
 
-            await http.Response.WriteAsJsonAsync(ApiResponse<object>.Fail("internal_error"));
+            await http.Response.WriteAsJsonAsync(ApiResponse<object>.Fail(AuthErrorCodes.InternalError));
         }
     }
 }
