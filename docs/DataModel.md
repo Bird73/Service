@@ -70,6 +70,9 @@
 - `created_at`
 - `expires_at`（now+5m）
 - `used_at`（null 代表未使用）
+- `provider`（nullable；attach 後不可再變更）
+- `code_verifier`（PKCE；nullable；attach 後不可再變更）
+- `nonce`（nullable；attach 後不可再變更）
 
 索引：
 - INDEX `(expires_at)`

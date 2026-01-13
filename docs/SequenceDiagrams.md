@@ -63,7 +63,7 @@ sequenceDiagram
     C->>API: GET /api/v1/auth/oidc/{provider}/challenge
     API->>SS: CreateStateAsync(tenant_id)
     SS->>SS: Generate random state (>=128-bit)
-    note over SS: 此步僅建立 tenant-aware state；PKCE/nonce 可在 start 時產生並綁定到 state
+    note over SS: state 必須綁定 tenant_id；PKCE/nonce/provider 會在 challenge 內一併綁定到 state
     SS->>DB: INSERT AuthState (state, tenant_id, expires_at=now+5m)
     SS-->>API: {state, expires_at}
     API-->>C: 200 OK {state, expires_at}
@@ -101,7 +101,8 @@ sequenceDiagram
         else Provider enabled
             PS-->>API: true
             note over API,PS: 產生 PKCE code_verifier + code_challenge 與 nonce
-            API->>SS: TryAttachOidcContextAsync(state, code_verifier, nonce)
+            note over API,SS: 將 provider + code_verifier + nonce 綁定到 state（attach 僅允許一次）
+            API->>SS: TryAttachOidcContextAsync(state, provider, code_verifier, nonce)
             API->>PS: GetAuthorizationUrlAsync(tenant_id, provider, state)
             PS-->>API: authorization_url
             API-->>B: 302 Redirect to authorization_url (含 code_challenge, nonce, state)
@@ -133,12 +134,23 @@ sequenceDiagram
         SS-->>API: null
         API-->>B: 302 Redirect to SPA error page (error=invalid_state)
     else State consumed
-        SS-->>API: AuthStateContext {tenant_id, code_verifier, nonce, ...}
+        SS-->>API: AuthStateContext {tenant_id, provider, code_verifier, nonce, ...}
+        note over API: callback 會先 consume state（一次性）再做後續驗證；任何失敗都不允許重用同一 state
+        alt Optional: X-Tenant-Id header present but mismatch
+            API-->>B: 400 ApiResponse.Fail("invalid_state")
+        else Provider mismatch
+            API-->>B: 400 ApiResponse.Fail("invalid_state")
+        else Continue
         note over API,PS: 交換 code 時需帶入 PKCE code_verifier；並在驗證 id_token 時驗 nonce
         API->>PS: ExchangeCodeAsync(tenant_id, provider, code, ctx)
         PS->>P: POST /token {code, client_id, client_secret, code_verifier(from state context)}
         P-->>PS: {id_token, access_token}
         PS->>PS: Validate id_token (含 nonce), extract (issuer, provider_sub)
+        alt Nonce mismatch
+            API-->>B: 400 ApiResponse.Fail("invalid_nonce")
+        else PKCE mismatch
+            API-->>B: 400 ApiResponse.Fail("invalid_pkce")
+        else OK
         PS-->>API: OidcUserInfo {issuer, provider_sub, email?, name?}
 
         API->>ES: FindOrCreateSubjectAsync(tenant_id, provider, issuer, provider_sub)
@@ -162,6 +174,7 @@ sequenceDiagram
         note over API,B: 實務上 callback 通常以 redirect 回前端（或寫入 HttpOnly cookie）
         API-->>B: 302 Redirect to SPA callback (攜帶 tokens 或 session cookie)
         B-->>SPA: Load callback page / complete login
+        end
     end
 ```
 

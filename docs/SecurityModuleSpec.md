@@ -81,7 +81,7 @@
 建議流程：
 
 1. Client/Browser 呼叫 `GET /api/v1/auth/oidc/{provider}/challenge`（Header 帶 `X-Tenant-Id`）
-2. API 建立一次性 state（5 分鐘），綁定 PKCE/nonce，並 302 Redirect 到 provider
+2. API 建立一次性 state（5 分鐘），並將 `tenant_id + provider + PKCE(code_verifier) + nonce` 綁定到 state，然後 302 Redirect 到 provider
 3. Provider 驗證完成回呼 `GET /api/v1/auth/oidc/{provider}/callback?state=...&code=...`
 4. API Consume state（一次性）後完成 mapping 並簽發 tokens
 
@@ -90,6 +90,22 @@ state 儲存要求：
 - `state` 必須不可預測（>= 128-bit 隨機）
 - `expires_at = now + 5m`
 - `used_at` 或 `consumed` 欄位確保一次性
+- 必須綁定下列欄位（callback 需完整比對）：
+  - `tenant_id`
+  - `provider`
+  - `nonce`
+  - `code_verifier`（PKCE）
+
+callback 驗證要求（安全負向案例）：
+
+- state 存在但 provider 不符：回 `400 invalid_state`
+- state 存在但 tenant 不符（若帶 `X-Tenant-Id` 且不符）：回 `400 invalid_state`（避免洩漏 state 所屬 tenant）
+- nonce mismatch：回 `400 invalid_nonce`
+- PKCE mismatch：回 `400 invalid_pkce`
+
+一次性語意：
+
+- callback 會先 consume state（atomic），因此「即使驗證失敗」也不允許重用同一 state（防止重放/暴力嘗試）。
 
 清理：
 

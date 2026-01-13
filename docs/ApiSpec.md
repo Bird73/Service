@@ -49,12 +49,22 @@
 ### GET /api/v1/auth/oidc/{provider}/challenge
 - 目的：啟動外部登入 challenge（server-side 產生一次性 state，並做 PKCE/nonce 綁定）
 - Header：`X-Tenant-Id: <guid>`
+- 行為（安全性）：
+	- server-side 建立一次性 `state`（5 分鐘有效）
+	- `state` 需綁定：`tenant_id` + `provider` + `nonce` + `code_verifier`（PKCE）
+	- 成功時通常以 `302` redirect 到 provider authorization url（含 `state` 與 `code_challenge`）
 
 ### GET /api/v1/auth/oidc/{provider}/callback?state=...&code=...
 - 目的：處理 provider callback，完成 ExternalIdentity mapping，發行 tokens
 - 需求：該 `tenant_id` 必須啟用此 `provider`；若 callback 時 provider 被停用，應拒絕並要求改用其他登入方式
 - 錯誤：若 provider 未啟用，回 `403` + `ApiResponse.Fail("provider_not_enabled")`
 - 錯誤：若外部身份 mapping 已存在但被停用，回 `403` + `ApiResponse.Fail("external_identity_disabled")`
+- 安全性驗證（callback）：
+	- 先 `consume` state（一次性），避免重放；任何結果都不允許重用同一 state
+	- 若 request 有帶 `X-Tenant-Id`，必須等於 state 綁定的 `tenant_id`，否則回 `400` + `invalid_state`（避免洩漏 state 所屬 tenant）
+	- path `{provider}` 必須等於 state 綁定的 provider，否則回 `400` + `invalid_state`
+	- nonce 驗證失敗回 `400` + `invalid_nonce`
+	- PKCE（code_verifier）驗證失敗回 `400` + `invalid_pkce`
 
 ## 4. Token refresh / revoke
 
