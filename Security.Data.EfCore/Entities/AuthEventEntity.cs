@@ -12,6 +12,11 @@ public sealed class AuthEventEntity
     public int Type { get; set; }
     public string Outcome { get; set; } = string.Empty;
 
+    // Spec columns
+    public string? Provider { get; set; }
+    public string? Issuer { get; set; }
+    public string? ErrorCode { get; set; }
+
     public string? Code { get; set; }
     public string? Detail { get; set; }
 
@@ -19,5 +24,5 @@ public sealed class AuthEventEntity
     public string? TraceId { get; set; }
     public string? Ip { get; set; }
     public string? UserAgent { get; set; }
-    public string? DataJson { get; set; }
+    public string? MetaJson { get; set; }
 }

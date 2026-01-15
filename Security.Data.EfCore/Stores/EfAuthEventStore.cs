@@ -22,13 +22,16 @@ public sealed class EfAuthEventStore : IAuthEventStore
             SessionId = ev.SessionId,
             Type = (int)ev.Type,
             Outcome = ev.Outcome,
+            Provider = ev.Provider,
+            Issuer = ev.Issuer,
+            ErrorCode = ev.ErrorCode,
             Code = ev.Code,
             Detail = ev.Detail,
             CorrelationId = ev.CorrelationId,
             TraceId = ev.TraceId,
             Ip = ev.Ip,
             UserAgent = ev.UserAgent,
-            DataJson = ev.DataJson,
+            MetaJson = ev.MetaJson,
         };
 
         _db.Add(entity);
@@ -37,12 +40,15 @@ public sealed class EfAuthEventStore : IAuthEventStore
 
     public async Task<IReadOnlyList<AuthEvent>> QueryAsync(AuthEventQuery query, CancellationToken cancellationToken = default)
     {
+        if (query.TenantId is null)
+        {
+            throw new ArgumentException("tenantId is required for audit log queries", nameof(query));
+        }
+
         var q = _db.AuthEvents.AsNoTracking().AsQueryable();
 
-        if (query.TenantId is Guid tenantId)
-        {
-            q = q.Where(x => x.TenantId == tenantId);
-        }
+        var tenantId = query.TenantId.Value;
+        q = q.Where(x => x.TenantId == tenantId);
 
         if (query.OurSubject is Guid subject)
         {
@@ -78,13 +84,16 @@ public sealed class EfAuthEventStore : IAuthEventStore
             SessionId = x.SessionId,
             Type = (AuthEventType)x.Type,
             Outcome = x.Outcome,
+            Provider = x.Provider,
+            Issuer = x.Issuer,
+            ErrorCode = x.ErrorCode,
             Code = x.Code,
             Detail = x.Detail,
             CorrelationId = x.CorrelationId,
             TraceId = x.TraceId,
             Ip = x.Ip,
             UserAgent = x.UserAgent,
-            DataJson = x.DataJson,
+            MetaJson = x.MetaJson,
         }).ToList();
     }
 }

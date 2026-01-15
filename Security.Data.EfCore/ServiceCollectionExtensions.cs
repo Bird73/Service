@@ -33,6 +33,15 @@ public static class ServiceCollectionExtensions
         services.AddScoped<ISessionStore, EfSessionStore>();
         services.AddScoped<IAuthEventStore, EfAuthEventStore>();
 
+        // Authorization (RBAC) data store (and admin surface)
+        services.AddScoped<EfAuthorizationStore>();
+        services.AddScoped<IAuthorizationDataStore>(sp => sp.GetRequiredService<EfAuthorizationStore>());
+        services.AddScoped<IAuthorizationAdminStore>(sp => sp.GetRequiredService<EfAuthorizationStore>());
+
+        // Entitlements (Products / TenantProducts)
+        services.AddScoped<IPermissionCatalogStore, EfPermissionCatalogStore>();
+        services.AddScoped<ITenantEntitlementStore, EfTenantEntitlementStore>();
+
         return services;
     }
 }

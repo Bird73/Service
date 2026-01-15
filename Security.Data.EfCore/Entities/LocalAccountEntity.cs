@@ -11,5 +11,12 @@ public sealed class LocalAccountEntity
     public string PasswordSalt { get; set; } = string.Empty;
     public int PasswordIterations { get; set; }
 
+    public int HashVersion { get; set; }
+    public DateTimeOffset? LastPasswordChangeAt { get; set; }
+
+    public int FailedAccessCount { get; set; }
+    public DateTimeOffset? LockedUntil { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }

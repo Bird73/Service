@@ -38,6 +38,7 @@ public sealed class EfSubjectRepository : ISubjectRepository
             Status = (int)UserStatus.Active,
             TokenVersion = 0,
             CreatedAt = now,
+            UpdatedAt = now,
         };
 
         _db.Subjects.Add(entity);
@@ -57,20 +58,26 @@ public sealed class EfSubjectRepository : ISubjectRepository
     {
         return await _db.Subjects
             .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.TokenVersion, newVersion), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.TokenVersion, newVersion)
+                .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 
     public async Task<int> IncrementTokenVersionAsync(Guid tenantId, Guid ourSubject, CancellationToken cancellationToken = default)
     {
         return await _db.Subjects
             .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.TokenVersion, x => x.TokenVersion + 1), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.TokenVersion, x => x.TokenVersion + 1)
+                .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 
     public async Task<int> UpdateStatusAsync(Guid tenantId, Guid ourSubject, UserStatus status, CancellationToken cancellationToken = default)
     {
         return await _db.Subjects
             .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, (int)status), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.Status, (int)status)
+                .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 }

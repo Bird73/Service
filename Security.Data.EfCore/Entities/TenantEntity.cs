@@ -7,4 +7,5 @@ public sealed class TenantEntity
     public int Status { get; set; }
     public int TokenVersion { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }

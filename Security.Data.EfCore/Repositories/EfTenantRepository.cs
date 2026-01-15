@@ -38,6 +38,7 @@ public sealed class EfTenantRepository : ITenantRepository
             Status = (int)TenantStatus.Active,
             TokenVersion = 0,
             CreatedAt = now,
+            UpdatedAt = now,
         };
 
         _db.Tenants.Add(entity);
@@ -57,13 +58,17 @@ public sealed class EfTenantRepository : ITenantRepository
     {
         return await _db.Tenants
             .Where(x => x.TenantId == tenantId)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.TokenVersion, x => x.TokenVersion + 1), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.TokenVersion, x => x.TokenVersion + 1)
+                .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 
     public async Task<int> UpdateStatusAsync(Guid tenantId, TenantStatus status, CancellationToken cancellationToken = default)
     {
         return await _db.Tenants
             .Where(x => x.TenantId == tenantId)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, (int)status), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.Status, (int)status)
+                .SetProperty(x => x.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken);
     }
 }

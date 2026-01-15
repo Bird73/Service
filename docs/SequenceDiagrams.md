@@ -189,7 +189,7 @@ sequenceDiagram
     participant TS as ITokenService
     participant DB as Database
 
-    C->>API: POST /api/auth/token/refresh<br/>{refresh_token}
+    C->>API: POST /api/v1/auth/token/refresh<br/>{refresh_token}
     API->>TS: RefreshAsync(refresh_token)
     TS->>TS: Hash(refresh_token)
     TS->>DB: SELECT RefreshToken WHERE token_hash=xxx
@@ -235,6 +235,132 @@ sequenceDiagram
             TS->>TS: GenerateAccessToken(tenant_id, our_subject, tenant_tv, subject_tv)
             TS-->>API: TokenPair {new access_token, new refresh_token}
             API-->>C: 200 OK {access_token, refresh_token, expires_in}
+            end
+        end
+    end
+```
+
+---
+
+## 4. Tenant Permission 管理（Entitlement 門禁 + 直授 permission）
+
+> 範例：租戶管理者對使用者新增一個 direct permission。
+
+```mermaid
+sequenceDiagram
+    participant C as Tenant Admin Client
+    participant API as Authorization API
+    participant PC as PermissionCatalog
+    participant ES as TenantEntitlementStore
+    participant AA as AuthorizationAdminStore
+    participant DB as Database
+
+    C->>API: POST /api/v1/tenant/users/{userId}/permissions<br/>{ permissionKey, reason? }
+    note over C,API: token 必須含 tenant_id；且需通過 AdminOnly policy
+
+    API->>PC: GetProductKeyForPermission(permissionKey)
+    PC->>DB: SELECT permissions.product_key WHERE perm_key=...
+    DB-->>PC: productKey | null
+
+    alt Unknown permissionKey
+        API-->>C: 404 ApiResponse.Fail("not_found")
+    else Known permissionKey
+        API->>ES: IsProductEnabled(tenantId, productKey, now)
+        ES->>DB: SELECT tenant_products + products (status + time window)
+        DB-->>ES: enabled | disabled
+
+        alt Product not enabled
+            API-->>C: 403 ApiResponse.Fail("product_not_enabled")
+        else Product enabled
+            note over API,AA: AdminStore 以「全量取代」更新 grants；API 需保留 roles/scopes
+            API->>DB: Load existing roles/scopes/direct permissions
+            API->>AA: SetSubjectGrantsAsync(tenantId, userId, roles, scopes, directPermissions+new)
+            AA->>DB: Replace grants; bump subject token version; write audit
+            API-->>C: 200 OK
+        end
+    end
+```
+
+---
+
+## 8. Platform Admin 指派 Product 給 Tenant（Tenant Entitlement）
+
+> 透過 platform 管理 API 建立/更新 `tenant_products`，使 entitlement 立即生效。
+
+```mermaid
+sequenceDiagram
+    participant PA as Platform Admin
+    participant API as Authorization API
+    participant DB as Database
+
+    PA->>API: PUT /api/v1/platform/tenants/{tenantId}/products/{productKey}<br/>{ status?, startAt?, endAt?, planJson? }
+    note over PA,API: 需通過 PlatformAdminOnly policy
+
+    API->>DB: SELECT products WHERE product_key = productKey
+    alt Product not found
+        API-->>PA: 404 ApiResponse.Fail("not_found")
+    else Product exists
+        API->>DB: UPSERT tenant_products (tenantId, productKey)
+        API-->>PA: 200 OK ApiResponse.Ok(tenantProduct)
+        note over API,DB: entitlement 變更會即時影響 Tenant Admin 授權管理與授權判斷鏈
+    end
+```
+
+---
+
+## 9. Tenant Admin 指派未啟用 Product 的 Permission（被拒）
+
+> entitlement 為前置門禁：permission 對應 product 未啟用（或不在有效期間）必須拒絕。
+
+```mermaid
+sequenceDiagram
+    participant TA as Tenant Admin
+    participant API as Authorization API
+    participant DB as Database
+
+    TA->>API: POST /api/v1/tenant/users/{userId}/permissions<br/>{ permissionKey }
+    note over TA,API: 需通過 AdminOnly policy；token 必須含 tenant_id
+
+    API->>DB: SELECT permissions.product_key WHERE perm_key = permissionKey
+    DB-->>API: productKey
+    API->>DB: Check entitlement via tenant_products + products + time window
+    DB-->>API: not enabled
+    API-->>TA: 403 ApiResponse.Fail("product_not_enabled")
+```
+
+---
+
+## 10. 使用者呼叫業務 API 的授權流程（JWT -> Entitlement -> RBAC）
+
+> 目標：第三方不看程式碼也能理解授權判斷固定順序。
+
+```mermaid
+sequenceDiagram
+    participant U as User / Client
+    participant SVC as Business API
+    participant JWT as JWT Validation
+    participant ENT as Entitlement Check
+    participant RBAC as RBAC / Permission Check
+    participant DB as Security DB
+
+    U->>SVC: Request + Authorization: Bearer(access_token)
+    SVC->>JWT: Validate signature/exp + tenant/user/session/token_version
+    alt JWT invalid
+        SVC-->>U: 401 Unauthorized
+    else JWT valid
+        SVC->>ENT: Map permissionKey -> productKey (permission catalog)
+        ENT->>DB: SELECT permissions.product_key
+        DB-->>ENT: productKey
+        ENT->>DB: Check tenant_products + products + time window
+        DB-->>ENT: enabled | disabled
+        alt Not entitled
+            SVC-->>U: 403 Forbidden
+        else Entitled
+            SVC->>RBAC: Evaluate roles/direct permissions/scopes
+            alt Allowed
+                SVC-->>U: 200 OK
+            else Denied
+                SVC-->>U: 403 Forbidden
             end
         end
     end
@@ -368,7 +494,7 @@ sequenceDiagram
     participant AZ as ISecurityAuthorizationService
     participant DB as Database
 
-    RS->>API: POST /api/authz/check<br/>{permission} + Authorization: Bearer(access)
+    RS->>API: POST /api/v1/authz/check<br/>{permission} + Authorization: Bearer(access)
     note over API: tenant_id / our_subject 優先從 JWT claims 取得（不信任呼叫端 body）
     API->>AZ: CheckPermissionAsync(tenant_id_from_claim, our_subject_from_claim, permission)
     AZ->>DB: SELECT FROM SubjectRoles sr<br/>JOIN RolePermissions rp ON sr.role_id = rp.role_id<br/>WHERE sr.tenant_id=? AND sr.our_subject=? AND rp.permission=?

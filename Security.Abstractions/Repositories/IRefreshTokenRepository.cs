@@ -11,6 +11,7 @@ public interface IRefreshTokenRepository
         Guid tenantId,
         Guid ourSubject,
         Guid sessionId,
+        string tokenLookup,
         string tokenHash,
         DateTimeOffset expiresAt,
         int issuedTenantTokenVersion,
@@ -18,23 +19,29 @@ public interface IRefreshTokenRepository
         CancellationToken cancellationToken = default);
 
     Task<RefreshTokenDto?> FindByHashAsync(
+        Guid tenantId,
+        string tokenLookup,
         string tokenHash,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 嘗試進行 rotation：建立新 token，並以 replacedBy 設定撤銷舊 token。
+    /// 嘗試進行 rotation：建立新 session row，並撤銷舊 session。
     /// 必須在同一交易中完成，避免併發導致雙花。
     /// </summary>
     Task<RefreshTokenDto?> TryRotateAsync(
         Guid tenantId,
         Guid ourSubject,
-        Guid sessionId,
+        Guid currentSessionId,
+        string currentTokenLookup,
         string currentTokenHash,
+        Guid newSessionId,
+        string newTokenLookup,
         string newTokenHash,
         DateTimeOffset expiresAt,
         DateTimeOffset now,
         int issuedTenantTokenVersion,
         int issuedSubjectTokenVersion,
+        string? revokeReason = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -43,9 +50,12 @@ public interface IRefreshTokenRepository
     Task<bool> RevokeAsync(
         Guid tenantId,
         Guid ourSubject,
+        Guid sessionId,
+        string tokenLookup,
         string tokenHash,
         DateTimeOffset revokedAt,
-        Guid? replacedByTokenId = null,
+        string? revokeReason = null,
+        Guid? replacedBySessionRecordId = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

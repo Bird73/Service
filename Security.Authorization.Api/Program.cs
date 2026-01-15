@@ -10,10 +10,13 @@ using Birdsoft.Security.Abstractions.Observability.Metrics;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authorization.Evaluation;
 using Birdsoft.Security.Authorization.Api.Auth;
+using Birdsoft.Security.Authorization.Api;
 using Birdsoft.Security.Authorization.Api.Observability.Health;
 using Birdsoft.Security.Authorization.Api.Observability.Logging;
+using Birdsoft.Security.Authorization.Stores;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
@@ -76,6 +79,22 @@ builder.Services.AddAuthorization(o =>
                 return false;
             }
 
+            // Tenant admin only: platform admins must use PlatformAdminOnly.
+            var platformScopes = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scope).Select(c => c.Value)
+                .Concat((user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scopes)?.Value ?? string.Empty)
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+            if (platformScopes.Any(s => string.Equals(s, "security.platform_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            var platformRoles = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Roles).Select(c => c.Value)
+                .Concat(user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Role).Select(c => c.Value));
+            if (platformRoles.Any(r => string.Equals(r, "platform_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
             var scope = user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scope)?.Value
                 ?? user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scopes)?.Value;
             if (!string.IsNullOrWhiteSpace(scope) && scope.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(s => string.Equals(s, "security.admin", StringComparison.OrdinalIgnoreCase)))
@@ -92,6 +111,37 @@ builder.Services.AddAuthorization(o =>
 
             var perms = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Permissions).Select(c => c.Value);
             return perms.Any(p => string.Equals(p, "security:admin", StringComparison.OrdinalIgnoreCase));
+        });
+    });
+
+    o.AddPolicy("PlatformAdminOnly", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireAssertion(ctx =>
+        {
+            var user = ctx.User;
+            if (user?.Identity?.IsAuthenticated != true)
+            {
+                return false;
+            }
+
+            // Platform admin must be cross-tenant; explicitly reject tenant-bound tokens.
+            var tenantId = user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TenantId)?.Value;
+            if (!string.IsNullOrWhiteSpace(tenantId))
+            {
+                return false;
+            }
+
+            var scope = user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scope)?.Value
+                ?? user.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Scopes)?.Value;
+            if (!string.IsNullOrWhiteSpace(scope) && scope.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(s => string.Equals(s, "security.platform_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var roles = user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Roles).Select(c => c.Value)
+                .Concat(user.FindAll(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.Role).Select(c => c.Value));
+            return roles.Any(r => string.Equals(r, "platform_admin", StringComparison.OrdinalIgnoreCase));
         });
     });
 });
@@ -123,11 +173,34 @@ if (useEf)
 }
 
 // Default (in-memory) authorization data store; replace with DB-backed implementation via DI.
-builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
+if (!useEf)
+{
+    builder.Services.AddSingleton<IAuthorizationDataStore, InMemoryAuthorizationDataStore>();
+}
 
-builder.Services.AddSingleton<IAuthorizationEvaluator, SimpleRbacAuthorizationEvaluator>();
+// Entitlement gating: EF-backed when available; otherwise allow-all for dev/in-memory mode.
+if (!useEf)
+{
+    builder.Services.AddSingleton<IPermissionCatalogStore, NullPermissionCatalogStore>();
+    builder.Services.AddSingleton<ITenantEntitlementStore, AllowAllTenantEntitlementStore>();
+}
+
+builder.Services.AddScoped<SimpleRbacAuthorizationEvaluator>();
+builder.Services.AddScoped<IAuthorizationEvaluator>(sp =>
+    new EntitlementAuthorizationEvaluator(
+        sp.GetRequiredService<SimpleRbacAuthorizationEvaluator>(),
+        sp.GetRequiredService<IPermissionCatalogStore>(),
+        sp.GetRequiredService<ITenantEntitlementStore>()));
 
 var app = builder.Build();
+
+// Some hosting environments (e.g., WebApplicationFactory) can override services/config after Program.cs
+// computes the initial useEf flag. Use the final DI container to decide whether EF-only endpoints exist.
+bool efEnabled;
+using (var scope = app.Services.CreateScope())
+{
+    efEnabled = scope.ServiceProvider.GetService<SecurityDbContext>() is not null;
+}
 
 // Startup safety checks (enabled by default outside Development)
 {
@@ -330,6 +403,452 @@ authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAut
     return Results.Json(ApiResponse<AuthzCheckResponse>.Ok(new AuthzCheckResponse(decision.Allowed, decision.Reason)));
 }).RequireAuthorization();
 
+static IReadOnlyDictionary<string, string[]> SingleField(string field, string message)
+    => new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase) { [field] = [message] };
+
+static Guid? TryGetTenantIdFromToken(HttpContext http)
+{
+    var claim = http.User?.FindFirst(SecurityClaimTypes.TenantId)?.Value;
+    if (!string.IsNullOrWhiteSpace(claim) && Guid.TryParse(claim, out var tenantId))
+    {
+        return tenantId;
+    }
+
+    return null;
+}
+
+if (efEnabled)
+{
+    var platform = api.MapGroup("/platform");
+    platform.RequireAuthorization("PlatformAdminOnly");
+
+    platform.MapGet("/products", async Task<Results<JsonHttpResult<ApiResponse<IReadOnlyList<ProductDto>>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        int? skip,
+        int? take,
+        int? status,
+        CancellationToken ct) =>
+    {
+        var s = Math.Max(0, skip ?? 0);
+        var t = Math.Clamp(take ?? 50, 1, 200);
+
+        var query = db.Products.AsNoTracking();
+        if (status is not null)
+        {
+            query = query.Where(x => x.Status == status.Value);
+        }
+
+        var items = await query
+            .OrderBy(x => x.ProductKey)
+            .Skip(s)
+            .Take(t)
+            .Select(x => new ProductDto(
+                x.ProductKey,
+                x.DisplayName,
+                x.Description,
+                (ProductStatus)x.Status,
+                x.CreatedAt,
+                x.UpdatedAt))
+            .ToListAsync(ct);
+
+        return TypedResults.Json(ApiResponse<IReadOnlyList<ProductDto>>.Ok(items));
+    });
+
+    platform.MapGet("/products/{productKey}", async Task<Results<JsonHttpResult<ApiResponse<ProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        string productKey,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var p = await db.Products.AsNoTracking().FirstOrDefaultAsync(x => x.ProductKey == productKey, ct);
+        if (p is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        return TypedResults.Json(ApiResponse<ProductDto>.Ok(new ProductDto(
+            p.ProductKey,
+            p.DisplayName,
+            p.Description,
+            (ProductStatus)p.Status,
+            p.CreatedAt,
+            p.UpdatedAt)));
+    });
+
+    platform.MapPost("/products", async Task<Results<JsonHttpResult<ApiResponse<ProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        PlatformCreateProductRequest request,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(request.ProductKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (string.IsNullOrWhiteSpace(request.DisplayName))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "displayName is required", SingleField("displayName", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var existing = await db.Products.AsNoTracking().AnyAsync(x => x.ProductKey == request.ProductKey.Trim(), ct);
+        if (existing)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.Conflict, "productKey already exists"), statusCode: StatusCodes.Status409Conflict);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var entity = new Birdsoft.Security.Data.EfCore.Entities.ProductEntity
+        {
+            ProductId = Guid.NewGuid(),
+            ProductKey = request.ProductKey.Trim(),
+            DisplayName = request.DisplayName.Trim(),
+            Description = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim(),
+            Status = (int)(request.Status ?? ProductStatus.Enabled),
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        db.Products.Add(entity);
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Json(ApiResponse<ProductDto>.Ok(new ProductDto(
+            entity.ProductKey,
+            entity.DisplayName,
+            entity.Description,
+            (ProductStatus)entity.Status,
+            entity.CreatedAt,
+            entity.UpdatedAt)), statusCode: StatusCodes.Status201Created);
+    });
+
+    platform.MapPut("/products/{productKey}", async Task<Results<JsonHttpResult<ApiResponse<ProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        string productKey,
+        PlatformUpdateProductRequest request,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var p = await db.Products.FirstOrDefaultAsync(x => x.ProductKey == productKey, ct);
+        if (p is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.DisplayName))
+        {
+            p.DisplayName = request.DisplayName.Trim();
+        }
+
+        if (request.Description is not null)
+        {
+            p.Description = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
+        }
+
+        if (request.Status is not null)
+        {
+            p.Status = (int)request.Status.Value;
+        }
+
+        p.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return TypedResults.Json(ApiResponse<ProductDto>.Ok(new ProductDto(
+            p.ProductKey,
+            p.DisplayName,
+            p.Description,
+            (ProductStatus)p.Status,
+            p.CreatedAt,
+            p.UpdatedAt)));
+    });
+
+    platform.MapGet("/tenants/{tenantId:guid}/products", async Task<Results<JsonHttpResult<ApiResponse<IReadOnlyList<TenantProductDto>>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        Guid tenantId,
+        CancellationToken ct) =>
+    {
+        var items = await (
+            from tp in db.TenantProducts.AsNoTracking()
+            join p in db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey into p0
+            from p in p0.DefaultIfEmpty()
+            where tp.TenantId == tenantId
+            orderby tp.ProductKey
+            select new TenantProductDto(
+                tp.TenantId,
+                tp.ProductKey,
+                p != null ? p.DisplayName : null,
+                (TenantProductStatus)tp.Status,
+                tp.StartAt,
+                tp.EndAt,
+                tp.PlanJson,
+                tp.CreatedAt,
+                tp.UpdatedAt))
+            .ToListAsync(ct);
+
+        return TypedResults.Json(ApiResponse<IReadOnlyList<TenantProductDto>>.Ok(items));
+    });
+
+    platform.MapGet("/tenants/{tenantId:guid}/products/{productKey}", async Task<Results<JsonHttpResult<ApiResponse<TenantProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        Guid tenantId,
+        string productKey,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var item = await (
+            from tp in db.TenantProducts.AsNoTracking()
+            join p in db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey into p0
+            from p in p0.DefaultIfEmpty()
+            where tp.TenantId == tenantId && tp.ProductKey == productKey
+            select new TenantProductDto(
+                tp.TenantId,
+                tp.ProductKey,
+                p != null ? p.DisplayName : null,
+                (TenantProductStatus)tp.Status,
+                tp.StartAt,
+                tp.EndAt,
+                tp.PlanJson,
+                tp.CreatedAt,
+                tp.UpdatedAt))
+            .FirstOrDefaultAsync(ct);
+
+        if (item is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "tenant product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        return TypedResults.Json(ApiResponse<TenantProductDto>.Ok(item));
+    });
+
+    platform.MapPut("/tenants/{tenantId:guid}/products/{productKey}", async Task<Results<JsonHttpResult<ApiResponse<TenantProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        Guid tenantId,
+        string productKey,
+        PlatformUpsertTenantProductRequest request,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var productExists = await db.Products.AsNoTracking().AnyAsync(x => x.ProductKey == productKey, ct);
+        if (!productExists)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var tp = await db.TenantProducts.FirstOrDefaultAsync(x => x.TenantId == tenantId && x.ProductKey == productKey, ct);
+
+        if (tp is null)
+        {
+            tp = new Birdsoft.Security.Data.EfCore.Entities.TenantProductEntity
+            {
+                TenantId = tenantId,
+                ProductKey = productKey,
+                Status = (int)(request.Status ?? TenantProductStatus.Enabled),
+                StartAt = request.StartAt ?? now,
+                EndAt = request.EndAt,
+                PlanJson = request.PlanJson,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+
+            db.TenantProducts.Add(tp);
+        }
+        else
+        {
+            if (request.Status is not null)
+            {
+                tp.Status = (int)request.Status.Value;
+            }
+
+            if (request.StartAt is not null)
+            {
+                tp.StartAt = request.StartAt.Value;
+            }
+
+            tp.EndAt = request.EndAt;
+            tp.PlanJson = request.PlanJson;
+
+            tp.UpdatedAt = now;
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        var display = await db.Products.AsNoTracking()
+            .Where(x => x.ProductKey == productKey)
+            .Select(x => x.DisplayName)
+            .FirstAsync(ct);
+
+        return TypedResults.Json(ApiResponse<TenantProductDto>.Ok(new TenantProductDto(
+            tp.TenantId,
+            tp.ProductKey,
+            display,
+            (TenantProductStatus)tp.Status,
+            tp.StartAt,
+            tp.EndAt,
+            tp.PlanJson,
+            tp.CreatedAt,
+            tp.UpdatedAt)));
+    });
+
+    platform.MapDelete("/tenants/{tenantId:guid}/products/{productKey}", async Task<Results<NoContent, JsonHttpResult<ApiResponse<object>>>> (
+        SecurityDbContext db,
+        Guid tenantId,
+        string productKey,
+        CancellationToken ct) =>
+    {
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var entity = await db.TenantProducts
+            .FirstOrDefaultAsync(x => x.TenantId == tenantId && x.ProductKey == productKey, ct);
+
+        if (entity is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "tenant product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        db.TenantProducts.Remove(entity);
+        await db.SaveChangesAsync(ct);
+        return TypedResults.NoContent();
+    });
+
+    var tenant = api.MapGroup("/tenant");
+    tenant.RequireAuthorization("AdminOnly");
+
+    tenant.MapGet("/products", async Task<Results<JsonHttpResult<ApiResponse<IReadOnlyList<TenantProductDto>>>, JsonHttpResult<ApiResponse<object>>>> (
+        HttpContext http,
+        SecurityDbContext db,
+        DateTimeOffset? now,
+        CancellationToken ct) =>
+    {
+        var tenantId = TryGetTenantIdFromToken(http);
+        if (tenantId is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "tenant_id claim is required"), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var clock = now ?? DateTimeOffset.UtcNow;
+
+        // SQLite has limitations translating DateTimeOffset comparisons; filter time windows in-memory only for SQLite.
+        List<TenantProductDto> items;
+        if (db.Database.IsSqlite())
+        {
+            items = await (
+                from tp in db.TenantProducts.AsNoTracking()
+                join p in db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey
+                where tp.TenantId == tenantId.Value
+                    && tp.Status == (int)TenantProductStatus.Enabled
+                    && p.Status == (int)ProductStatus.Enabled
+                orderby tp.ProductKey
+                select new TenantProductDto(
+                    tp.TenantId,
+                    tp.ProductKey,
+                    p.DisplayName,
+                    (TenantProductStatus)tp.Status,
+                    tp.StartAt,
+                    tp.EndAt,
+                    tp.PlanJson,
+                    tp.CreatedAt,
+                    tp.UpdatedAt))
+                .ToListAsync(ct);
+
+            items = items
+                .Where(x => x.StartAt <= clock && (x.EndAt is null || x.EndAt > clock))
+                .ToList();
+        }
+        else
+        {
+            items = await (
+                from tp in db.TenantProducts.AsNoTracking()
+                join p in db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey
+                where tp.TenantId == tenantId.Value
+                    && tp.Status == (int)TenantProductStatus.Enabled
+                    && p.Status == (int)ProductStatus.Enabled
+                    && tp.StartAt <= clock
+                    && (tp.EndAt == null || tp.EndAt > clock)
+                orderby tp.ProductKey
+                select new TenantProductDto(
+                    tp.TenantId,
+                    tp.ProductKey,
+                    p.DisplayName,
+                    (TenantProductStatus)tp.Status,
+                    tp.StartAt,
+                    tp.EndAt,
+                    tp.PlanJson,
+                    tp.CreatedAt,
+                    tp.UpdatedAt))
+                .ToListAsync(ct);
+        }
+
+        return TypedResults.Json(ApiResponse<IReadOnlyList<TenantProductDto>>.Ok(items));
+    });
+
+    tenant.MapGet("/products/{productKey}", async Task<Results<JsonHttpResult<ApiResponse<TenantProductDto>>, JsonHttpResult<ApiResponse<object>>>> (
+        HttpContext http,
+        SecurityDbContext db,
+        string productKey,
+        DateTimeOffset? now,
+        CancellationToken ct) =>
+    {
+        var tenantId = TryGetTenantIdFromToken(http);
+        if (tenantId is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "tenant_id claim is required"), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        if (string.IsNullOrWhiteSpace(productKey))
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.InvalidRequest, "productKey is required", SingleField("productKey", "required")), statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var clock = now ?? DateTimeOffset.UtcNow;
+
+        var item = await (
+            from tp in db.TenantProducts.AsNoTracking()
+            join p in db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey
+            where tp.TenantId == tenantId.Value && tp.ProductKey == productKey
+            select new { tp, p })
+            .FirstOrDefaultAsync(ct);
+
+        if (item is null)
+        {
+            return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "tenant product not found"), statusCode: StatusCodes.Status404NotFound);
+        }
+
+        // If it's not currently enabled, still return it (tenant admins need visibility).
+        _ = clock;
+
+        return TypedResults.Json(ApiResponse<TenantProductDto>.Ok(new TenantProductDto(
+            item.tp.TenantId,
+            item.tp.ProductKey,
+            item.p.DisplayName,
+            (TenantProductStatus)item.tp.Status,
+            item.tp.StartAt,
+            item.tp.EndAt,
+            item.tp.PlanJson,
+            item.tp.CreatedAt,
+            item.tp.UpdatedAt)));
+    });
+
+    tenant.MapTenantPermissionManagement();
+}
+
 app.MapGet("/metrics", () => Results.Text(SecurityMetrics.ToPrometheusText(SecurityMetrics.Snapshot()), "text/plain"));
 
 app.MapHealthChecks("/health", new HealthCheckOptions
@@ -376,3 +895,41 @@ internal sealed class InMemoryAuthorizationDataStore : IAuthorizationDataStore
         return ValueTask.FromResult<IReadOnlyList<string>>([]);
     }
 }
+
+public sealed record ProductDto(
+    string ProductKey,
+    string DisplayName,
+    string? Description,
+    ProductStatus Status,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record TenantProductDto(
+    Guid TenantId,
+    string ProductKey,
+    string? DisplayName,
+    TenantProductStatus Status,
+    DateTimeOffset StartAt,
+    DateTimeOffset? EndAt,
+    string? PlanJson,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt);
+
+public sealed record PlatformCreateProductRequest(
+    string ProductKey,
+    string DisplayName,
+    string? Description,
+    ProductStatus? Status);
+
+public sealed record PlatformUpdateProductRequest(
+    string? DisplayName,
+    string? Description,
+    ProductStatus? Status);
+
+public sealed record PlatformUpsertTenantProductRequest(
+    TenantProductStatus? Status,
+    DateTimeOffset? StartAt,
+    DateTimeOffset? EndAt,
+    string? PlanJson);
+
+public partial class Program { }

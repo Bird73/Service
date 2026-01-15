@@ -6,6 +6,9 @@ namespace Birdsoft.Security.Abstractions.Constants;
 public static class AuthErrorCodes
 {
     public const string InvalidRequest = "invalid_request";
+    public const string NotFound = "not_found";
+    public const string Conflict = "conflict";
+    public const string Forbidden = "forbidden";
     public const string InvalidCredentials = "invalid_credentials";
     public const string TenantMismatch = "tenant_mismatch";
     public const string TenantNotActive = "tenant_not_active";
@@ -37,6 +40,7 @@ public static class AuthErrorCodes
     public const string RefreshTokenReuseDetected = "refresh_token_reuse_detected";
     public const string AccessTokenRevoked = "access_token_revoked";
     public const string RateLimited = "rate_limited";
+    public const string ProductNotEnabled = "product_not_enabled";
     public const string BruteForceBlocked = "brute_force_blocked";
     public const string BruteForceDelayed = "brute_force_delayed";
     public const string UserNotFound = "user_not_found";

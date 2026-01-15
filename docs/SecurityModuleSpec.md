@@ -172,6 +172,55 @@ JWT 是否內嵌 permission：
 
 ---
 
+## 8. Entitlements（產品啟用）與授權判斷鏈
+
+目標：在 RBAC 之前加上一層「產品啟用（entitlement）」門禁，使租戶可即時停用某產品而立即生效。
+
+決策鏈（固定順序）：
+1. JWT 驗證通過（含 tenant/user 狀態、session、token_version）
+2. Entitlement 檢查：permission 對應的 product 在 tenant 下必須已啟用（含時間窗）
+3. RBAC（roles / direct permissions / scopes）判斷 allow/deny
+
+permission -> product 對應：
+- 由 permission catalog 查出 `permissionKey -> productKey`（落地以 `permissions.product_key` 為來源）。
+- 若 permissionKey 不存在：管理介面回 `404 not_found`；授權檢查則視既有設計回 deny。
+
+---
+
+## 9. Tenant / Platform 管理面（最小 API）
+
+Tenant Admin（租戶管理者；需 `tenant_id` token）：
+- `GET /api/v1/tenant/permissions?productKey=`：查詢 tenant 可用 permissions（僅已啟用 product）
+- `POST /api/v1/tenant/users/{userId}/permissions`：新增直授 permission（先 entitlement gate）
+- `DELETE /api/v1/tenant/users/{userId}/permissions/{permissionKey}`：移除直授 permission（先 entitlement gate）
+
+Platform Admin（平台管理者；跨租戶）：
+- `DELETE /api/v1/platform/tenants/{tenantId}/products/{productKey}`：移除 tenant_products（立即生效）
+
+---
+
+## 10. 風險與設計限制
+
+### Permission Catalog 設計限制（本次僅文件說明；不調整行為）
+
+- **Permissions 為平台統一（global）catalog**：permissions 表為全域共享，不是 tenant-scoped。
+- **Permission Key 為全域唯一**：`permissionKey` 在整個平台必須唯一；不同租戶無法各自定義「同名但不同語意」的 permission key。
+- **不支援租戶語意獨立的 permission key**：本次實作的 permissionKey -> productKey 對應與 entitlement 門禁，建立在「同一 permissionKey 對應同一 productKey」的前提。
+- **若未來要支援 tenant-scoped permissions**：
+  - 需要引入 tenant-scoped permission schema（例如 `(tenant_id, permission_key)` 或 tenant 專屬 catalog）。
+  - 將影響 entitlement 與 RBAC 的資料模型與查詢邏輯（permission catalog、permission->productKey 對應、授權快取/失效策略等）。
+  - **不在本次實作與修正範圍內**。
+
+### 其他落地風險備忘
+
+- **Grant 更新覆寫風險**：`SetSubjectGrantsAsync(...)` 為「全量取代」語意；因此 tenant permission 管理 API 必須先讀取並保留既有 roles/scopes，避免誤刪。
+- **競態條件**：同一 subject 的權限變更若併發（多個管理者同時修改），可能發生最後寫入覆蓋；若要強化可考慮加上樂觀鎖（rowversion/updated_at）或在 store 層做 transactional compare-and-swap。
+- **即時生效 vs 快取**：目前 entitlement 判斷以 DB 即時查詢，停用可立即生效；若未來加入快取，需明確 TTL/失效策略（並以 `authz_tenant_versions` 或事件通知做快取失效）。
+- **時間窗一致性**：entitlement 依 `start_at/end_at` + `now` 判斷，需統一使用 UTC（`DateTimeOffset.UtcNow`）避免時區/DST 造成誤判。
+- **權限命名與歸屬**：permissionKey 必須可一對一映射到 productKey；若允許 `product_key` 為 null 的 permission，需明確定義是否跳過 entitlement（建議管理 API 一律拒絕或僅允許平台級 permission）。
+
+---
+
 ## 8. 邊界與後續釐清（需要你確認）
 
 已確認：

@@ -26,6 +26,21 @@ public sealed record AuthEvent
     public required string Outcome { get; init; }
 
     /// <summary>
+    /// Authentication provider identifier (e.g. google/line/microsoft). Optional.
+    /// </summary>
+    public string? Provider { get; init; }
+
+    /// <summary>
+    /// External issuer (OIDC Issuer). Optional.
+    /// </summary>
+    public string? Issuer { get; init; }
+
+    /// <summary>
+    /// Stable error code for failures (no stack trace). Optional.
+    /// </summary>
+    public string? ErrorCode { get; init; }
+
+    /// <summary>
     /// Stable machine-readable code (e.g. invalid_request, mfa_failed, rate_limited).
     /// </summary>
     public string? Code { get; init; }
@@ -38,5 +53,5 @@ public sealed record AuthEvent
     /// <summary>
     /// Optional JSON payload for structured details.
     /// </summary>
-    public string? DataJson { get; init; }
+    public string? MetaJson { get; init; }
 }

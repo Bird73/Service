@@ -49,6 +49,8 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
         public int RefreshTokenDays { get; init; } = 7;
         public int ClockSkewSeconds { get; init; } = 30;
 
+        public string RefreshTokenPepper { get; init; } = "integration-test-pepper";
+
         public string EnvironmentId { get; init; } = "test";
         public bool SafetyEnabled { get; init; } = false;
 
@@ -77,6 +79,8 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
                 [$"{JwtOptions.SectionName}:AccessTokenMinutes"] = _overrides.AccessTokenMinutes.ToString(),
                 [$"{JwtOptions.SectionName}:RefreshTokenDays"] = _overrides.RefreshTokenDays.ToString(),
                 [$"{JwtOptions.SectionName}:ClockSkewSeconds"] = _overrides.ClockSkewSeconds.ToString(),
+
+                [$"{RefreshTokenHashingOptions.SectionName}:Pepper"] = _overrides.RefreshTokenPepper,
 
                 [$"{SecurityEnvironmentOptions.SectionName}:EnvironmentId"] = _overrides.EnvironmentId,
 

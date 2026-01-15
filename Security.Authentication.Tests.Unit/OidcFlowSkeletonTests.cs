@@ -107,7 +107,7 @@ public sealed class OidcFlowSkeletonTests
         IOptionsMonitor<SecurityEnvironmentOptions> env = new FakeOptionsMonitor<SecurityEnvironmentOptions>(new SecurityEnvironmentOptions { EnvironmentId = "test" });
         IOptionsMonitor<SecuritySafetyOptions> safety = new FakeOptionsMonitor<SecuritySafetyOptions>(new SecuritySafetyOptions { Enabled = false, RequireEnvironmentId = false, EnforceTenantJwtIsolation = false });
         IHostEnvironment hostEnvironment = new FakeHostEnvironment { EnvironmentName = Environments.Development };
-        IOptionsMonitor<RefreshTokenHashingOptions> hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions());
+        IOptionsMonitor<RefreshTokenHashingOptions> hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions { Pepper = "unit-test-pepper" });
         var keys = new Birdsoft.Security.Authentication.Jwt.DefaultJwtKeyProvider(monitor);
         var sessions = new Birdsoft.Security.Authentication.InMemorySessionStore();
         var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, env, safety, hostEnvironment, hashing, keys, sessions);

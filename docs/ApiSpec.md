@@ -31,7 +31,7 @@
 
 ### Audit events（稽核）
 
-- 主要 auth/authz/token flow 會寫入 audit event（EF mode 落到 `auth_events` 表）。
+- 主要 auth/authz/token flow 會寫入 audit event（EF mode 落到 `security_audit_logs` 表）。
 - non-EF mode 會以 no-op store 略過寫入，不影響主流程。
 
 ## 2. Password login（自家帳密）
@@ -105,6 +105,10 @@
 
 ## 6. Authorization
 
+> 本章節包含兩類管理 API：
+> - Platform Admin：控制「租戶可用哪些系統（Products / TenantProducts entitlement）」
+> - Tenant Admin：僅能在「租戶已啟用的系統」內做授權管理（Entitlement 為 RBAC 前置條件）
+
 ### POST /api/v1/authz/check
 - Tenant 來源：JWT claim `tenant_id`（若有）優先，其次 Header `X-Tenant-Id`
 - Body：`{ ourSubject, resource, action, context }`
@@ -114,6 +118,124 @@
 - `400 invalid_request`
 - `403 tenant_not_active`
 - `403 user_not_active`
+
+### 6.1 Platform Administration APIs（Platform Admin）
+
+> 用途：平台管理者維護 Products（全域產品目錄）以及 TenantProducts（租戶 entitlement）。
+>
+> 與授權流程的關係：Entitlement 是授權前置條件（Entitlement -> RBAC）。
+
+共通規則：
+- Auth：Bearer token
+- Policy：`PlatformAdminOnly`（僅 PlatformAdmin 可存取）
+
+#### GET /api/v1/platform/products
+- 存取：僅 `PlatformAdminOnly`
+- 用途：列出平台產品（Products）
+- Query（optional）：
+	- `status`：產品狀態篩選
+	- `skip` / `take`
+- 回傳：`ApiResponse<List<{ productKey, displayName, description, status, createdAt, updatedAt }>>`
+
+#### POST /api/v1/platform/products
+- 存取：僅 `PlatformAdminOnly`
+- 用途：建立產品（Products）
+- Body：`{ productKey, displayName, description?, status? }`
+- 回傳：
+	- `201 Created`：`ApiResponse.Ok(product)`
+
+常見錯誤：
+- `400 invalid_request`（欄位缺漏/不合法）
+- `409 conflict`（productKey 已存在）
+
+#### GET /api/v1/platform/tenants/{tenantId}/products
+- 存取：僅 `PlatformAdminOnly`
+- 用途：列出某租戶的產品 entitlement（TenantProducts；包含 displayName 以便管理 UI 顯示）
+- 回傳：`ApiResponse<List<{ tenantId, productKey, displayName?, status, startAt, endAt, planJson?, createdAt, updatedAt }>>`
+
+#### PUT /api/v1/platform/tenants/{tenantId}/products/{productKey}
+- 存取：僅 `PlatformAdminOnly`
+- 用途：新增或更新租戶的產品 entitlement（TenantProducts upsert）
+- Body：`{ status?, startAt?, endAt?, planJson? }`
+- 行為：
+	- 若該租戶尚無 entitlement，會建立一筆 tenant_products
+	- 若已存在，會更新狀態與時間窗
+	- Entitlement 變更會即時影響 Tenant Admin 授權管理 API 及授權判斷鏈
+
+常見錯誤：
+- `400 invalid_request`（productKey 缺漏/不合法）
+- `404 not_found`（product 不存在）
+
+#### DELETE /api/v1/platform/tenants/{tenantId}/products/{productKey}
+- 存取：僅 `PlatformAdminOnly`
+- 用途：移除租戶的產品 entitlement（刪除 tenant_products 該筆）
+- 回傳：
+	- `204 No Content`：刪除成功
+	- `404 Not Found`：該租戶/產品 entitlement 不存在
+
+---
+
+### 6.2 Tenant Administration APIs（Tenant Admin；Entitlement 強制門禁）
+
+> 用途：租戶管理者查詢租戶已啟用之產品與 permissions，並調整使用者的「直授（direct）permission」。
+>
+> 重要規則（必須一致）：
+> - Tenant Admin 僅能操作 tenant 已啟用（enabled 且在有效期間）的 Product。
+> - 若 permission 所屬 product 未啟用（或不在有效期間），API 必須回 `403 Forbidden`（error code：`product_not_enabled`）。
+> - Entitlement 檢查為 RBAC 前置條件（不得退回 RBAC 允許）。
+
+共通規則：
+- Auth：Bearer token（必須有 `tenant_id` claim）
+- Policy：`AdminOnly`（僅 Tenant Admin 可存取）
+
+#### GET /api/v1/tenant/products
+- 存取：僅 `AdminOnly`（Tenant Admin）
+- 用途：列出「目前 tenant 已啟用」的 products（可作為管理 UI 的選單來源）
+- 回傳：`ApiResponse<List<{ tenantId, productKey, displayName, status, startAt, endAt, planJson?, createdAt, updatedAt }>>`
+
+常見錯誤：
+- `400 invalid_request`（token 缺少 tenant_id claim）
+- `403 forbidden`（未具備 Tenant Admin 權限）
+
+#### GET /api/v1/tenant/permissions?productKey=
+- 存取：僅 `AdminOnly`（Tenant Admin）
+- 用途：列出 tenant 可用的 permissions
+- Query：
+	- `productKey`（optional）
+		- 有帶：僅列該產品的 permissions（但必須先通過 entitlement 門禁）
+		- 未帶：列出「目前 tenant 已啟用產品」的 permissions（會排除未啟用產品）
+- 回傳：`ApiResponse<List<{ permissionKey, productKey, description }>>`
+
+常見錯誤：
+- `400 invalid_request`（token 缺少 tenant_id claim）
+- `403 forbidden`
+- `403 product_not_enabled`
+
+#### POST /api/v1/tenant/users/{userId}/permissions
+- 存取：僅 `AdminOnly`（Tenant Admin）
+- 用途：新增使用者的 direct permission
+- Body：`{ permissionKey, reason? }`
+- 行為：
+	- 先由 permissionKey 查出 productKey
+	- 再檢查 tenant 是否啟用該 product（含時間窗）
+	- 通過才會更新 subject 的 direct permissions（不影響既有 roles/scopes）
+
+常見錯誤：
+- `400 invalid_request`
+- `403 forbidden`
+- `403 product_not_enabled`
+- `404 not_found`（permission 不存在或 user 不存在）
+
+#### DELETE /api/v1/tenant/users/{userId}/permissions/{permissionKey}
+- 存取：僅 `AdminOnly`（Tenant Admin）
+- 用途：移除使用者的 direct permission
+- 行為：同上（先 entitlement gate，再移除 direct permission；不影響既有 roles/scopes）
+
+常見錯誤：
+- `400 invalid_request`
+- `403 forbidden`
+- `403 product_not_enabled`
+- `404 not_found`（permission 不存在或 user 不存在）
 
 ## 7. Health
 

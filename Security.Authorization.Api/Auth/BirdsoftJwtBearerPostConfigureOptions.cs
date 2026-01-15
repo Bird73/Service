@@ -12,6 +12,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Security.Claims;
 using System.Text;
 
 public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOptions<JwtBearerOptions>
@@ -120,6 +121,39 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             return Guid.TryParse(raw, out tenantId);
         }
 
+        static bool IsPlatformAdmin(ClaimsPrincipal principal)
+        {
+            var scopes = principal.FindAll(SecurityClaimTypes.Scope).Select(c => c.Value)
+                .Concat((principal.FindFirst(SecurityClaimTypes.Scopes)?.Value ?? string.Empty)
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+            if (scopes.Any(s => string.Equals(s, "security.platform_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var roles = principal.FindAll(SecurityClaimTypes.Roles).Select(c => c.Value)
+                .Concat(principal.FindAll(SecurityClaimTypes.Role).Select(c => c.Value));
+
+            return roles.Any(r => string.Equals(r, "platform_admin", StringComparison.OrdinalIgnoreCase));
+        }
+
+        static bool HasAnyNonPlatformRole(ClaimsPrincipal principal)
+        {
+            var roles = principal.FindAll(SecurityClaimTypes.Roles).Select(c => c.Value)
+                .Concat(principal.FindAll(SecurityClaimTypes.Role).Select(c => c.Value));
+
+            foreach (var role in roles)
+            {
+                if (!string.Equals(role, "platform_admin", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         bool ShouldValidateIssuer(JwtOptions jwt)
             => !string.IsNullOrWhiteSpace(jwt.Issuer) || (jwt.Tenants?.Any(t => !string.IsNullOrWhiteSpace(t.Issuer)) ?? false);
 
@@ -143,12 +177,10 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 var jwt = _jwtOptions.CurrentValue;
                 var env = _envOptions.CurrentValue;
 
-                if (!TryGetTenantIdFromToken(securityToken, out var tenantId))
-                {
-                    throw new SecurityTokenInvalidIssuerException("missing_tenant");
-                }
+                var eff = TryGetTenantIdFromToken(securityToken, out var tenantId)
+                    ? JwtTenantResolution.Resolve(jwt, tenantId)
+                    : JwtTenantResolution.Resolve(jwt, Guid.Empty);
 
-                var eff = JwtTenantResolution.Resolve(jwt, tenantId);
                 var legacy = eff.Issuer;
                 var envScoped = JwtTenantResolution.ApplyEnvironmentSuffix(legacy, env);
                 if (string.Equals(issuer, legacy, StringComparison.Ordinal) || string.Equals(issuer, envScoped, StringComparison.Ordinal))
@@ -165,12 +197,10 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 var jwt = _jwtOptions.CurrentValue;
                 var env = _envOptions.CurrentValue;
 
-                if (!TryGetTenantIdFromToken(securityToken, out var tenantId))
-                {
-                    return false;
-                }
+                var eff = TryGetTenantIdFromToken(securityToken, out var tenantId)
+                    ? JwtTenantResolution.Resolve(jwt, tenantId)
+                    : JwtTenantResolution.Resolve(jwt, Guid.Empty);
 
-                var eff = JwtTenantResolution.Resolve(jwt, tenantId);
                 var legacy = eff.Audience;
                 var envScoped = JwtTenantResolution.ApplyEnvironmentSuffix(legacy, env);
                 return audiences.Any(a => string.Equals(a, legacy, StringComparison.Ordinal) || string.Equals(a, envScoped, StringComparison.Ordinal));
@@ -227,9 +257,51 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             var subjectRaw = principal.FindFirst("sub")?.Value;
             var sessionRaw = principal.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.SessionId)?.Value;
 
-            if (!Guid.TryParse(tenantRaw, out var tenantId) || !Guid.TryParse(subjectRaw, out var ourSubject))
+            var isPlatformAdmin = IsPlatformAdmin(principal);
+
+            if (!Guid.TryParse(subjectRaw, out var ourSubject))
             {
                 context.Fail("invalid_token");
+                return;
+            }
+
+            var hasTenant = Guid.TryParse(tenantRaw, out var tenantId);
+
+            // Enforce tier separation: platform token MUST NOT carry tenant_id or non-platform roles.
+            // Tenant token MUST carry tenant_id and MUST NOT carry platform role/scope.
+            if (isPlatformAdmin)
+            {
+                if (hasTenant)
+                {
+                    context.Fail("mixed_platform_tenant_identity");
+                    return;
+                }
+
+                if (HasAnyNonPlatformRole(principal))
+                {
+                    context.Fail("mixed_platform_roles");
+                    return;
+                }
+
+                // Platform admin: no tenant/subject activity checks here (platform surface is cross-tenant).
+                return;
+            }
+
+            if (!hasTenant)
+            {
+                context.Fail("missing_tenant");
+                return;
+            }
+
+            // Prevent a tenant token from claiming platform authority.
+            if (principal.FindAll(SecurityClaimTypes.Roles).Any(c => string.Equals(c.Value, "platform_admin", StringComparison.OrdinalIgnoreCase))
+                || principal.FindAll(SecurityClaimTypes.Role).Any(c => string.Equals(c.Value, "platform_admin", StringComparison.OrdinalIgnoreCase))
+                || principal.FindAll(SecurityClaimTypes.Scope).Any(c => string.Equals(c.Value, "security.platform_admin", StringComparison.OrdinalIgnoreCase))
+                || (principal.FindFirst(SecurityClaimTypes.Scopes)?.Value ?? string.Empty)
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Any(s => string.Equals(s, "security.platform_admin", StringComparison.OrdinalIgnoreCase)))
+            {
+                context.Fail("mixed_platform_tenant_identity");
                 return;
             }
 

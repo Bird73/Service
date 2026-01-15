@@ -12,35 +12,28 @@ public sealed class EfSessionStore : ISessionStore
 
     public async Task<Guid> CreateSessionAsync(Guid tenantId, Guid ourSubject, DateTimeOffset createdAt, CancellationToken cancellationToken = default)
     {
-        var sessionId = Guid.NewGuid();
-        var entity = new TokenSessionEntity
-        {
-            TenantId = tenantId,
-            SessionId = sessionId,
-            OurSubject = ourSubject,
-            CreatedAt = createdAt,
-            TerminatedAt = null,
-            TerminationReason = null,
-        };
-
-        _db.Add(entity);
-        await _db.SaveChangesAsync(cancellationToken);
-        return sessionId;
+        // refresh_sessions are created together with the refresh token record.
+        // Keep this API for compatibility; callers should create refresh session via IRefreshTokenRepository.
+        _ = tenantId;
+        _ = ourSubject;
+        _ = createdAt;
+        _ = cancellationToken;
+        return Guid.NewGuid();
     }
 
     public async Task<bool> IsSessionActiveAsync(Guid tenantId, Guid sessionId, CancellationToken cancellationToken = default)
     {
-        return await _db.Set<TokenSessionEntity>().AsNoTracking()
-            .AnyAsync(x => x.TenantId == tenantId && x.SessionId == sessionId && x.TerminatedAt == null, cancellationToken);
+        return await _db.RefreshSessions.AsNoTracking()
+            .AnyAsync(x => x.TenantId == tenantId && x.SessionId == sessionId && x.RevokedAt == null, cancellationToken);
     }
 
     public async Task<bool> TerminateSessionAsync(Guid tenantId, Guid sessionId, DateTimeOffset terminatedAt, string? reason = null, CancellationToken cancellationToken = default)
     {
-        var updated = await _db.Set<TokenSessionEntity>()
-            .Where(x => x.TenantId == tenantId && x.SessionId == sessionId && x.TerminatedAt == null)
+        var updated = await _db.RefreshSessions
+            .Where(x => x.TenantId == tenantId && x.SessionId == sessionId && x.RevokedAt == null)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.TerminatedAt, terminatedAt)
-                .SetProperty(x => x.TerminationReason, reason),
+                .SetProperty(x => x.RevokedAt, terminatedAt)
+                .SetProperty(x => x.RevocationReason, reason),
                 cancellationToken);
 
         return updated > 0;
@@ -48,11 +41,11 @@ public sealed class EfSessionStore : ISessionStore
 
     public async Task<int> TerminateAllAsync(Guid tenantId, Guid ourSubject, DateTimeOffset terminatedAt, string? reason = null, CancellationToken cancellationToken = default)
     {
-        return await _db.Set<TokenSessionEntity>()
-            .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject && x.TerminatedAt == null)
+        return await _db.RefreshSessions
+            .Where(x => x.TenantId == tenantId && x.OurSubject == ourSubject && x.RevokedAt == null)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.TerminatedAt, terminatedAt)
-                .SetProperty(x => x.TerminationReason, reason),
+                .SetProperty(x => x.RevokedAt, terminatedAt)
+                .SetProperty(x => x.RevocationReason, reason),
                 cancellationToken);
     }
 }

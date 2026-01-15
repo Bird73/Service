@@ -242,7 +242,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         var jti = Guid.NewGuid().ToString("N");
         var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, roles, scopes);
 
-        var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var refreshToken = CreateRefreshToken(tenantId);
         var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
         _refresh[HashRefreshToken(refreshToken)] = new RefreshRecord(tenantId, ourSubject, sessionId, refreshExpires, Revoked: false, ReplacedByTokenHash: null);
 
@@ -257,6 +257,16 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
     public Task<RefreshResult> RefreshAsync(Guid tenantId, string refreshToken, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
+        }
+
+        if (TryExtractTenantId(refreshToken, out var tokenTenantId) && tokenTenantId != tenantId)
+        {
+            return Task.FromResult(RefreshResult.Fail("invalid_tenant"));
+        }
+
         var tokenHash = HashRefreshToken(refreshToken);
         if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
@@ -267,11 +277,6 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         if (rec.TenantId != tenantId)
         {
             return Task.FromResult(RefreshResult.Fail("invalid_tenant"));
-        }
-
-        if (!_sessions.IsSessionActiveAsync(rec.TenantId, rec.SessionId, cancellationToken).GetAwaiter().GetResult())
-        {
-            return Task.FromResult(RefreshResult.Fail("session_terminated"));
         }
 
         if (rec.ExpiresAt <= _time.GetUtcNow())
@@ -302,18 +307,32 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             return Task.FromResult(RefreshResult.Fail("revoked_refresh_token"));
         }
 
+        if (!_sessions.IsSessionActiveAsync(rec.TenantId, rec.SessionId, cancellationToken).GetAwaiter().GetResult())
+        {
+            return Task.FromResult(RefreshResult.Fail("session_terminated"));
+        }
+
         // rotation
-        var newRefresh = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var newRefresh = CreateRefreshToken(rec.TenantId);
         var newHash = HashRefreshToken(newRefresh);
+
+        // Spec: each refresh rotation creates a new session.
+        var newSessionId = _sessions.CreateSessionAsync(rec.TenantId, rec.OurSubject, _time.GetUtcNow(), cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+        _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "rotated", cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+
         var replaced = rec with { Revoked = true, ReplacedByTokenHash = newHash };
         _refresh[tokenHash] = replaced;
 
-        var newRec = new RefreshRecord(rec.TenantId, rec.OurSubject, rec.SessionId, rec.ExpiresAt, Revoked: false, ReplacedByTokenHash: null);
+        var newRec = new RefreshRecord(rec.TenantId, rec.OurSubject, newSessionId, rec.ExpiresAt, Revoked: false, ReplacedByTokenHash: null);
         _refresh[newHash] = newRec;
 
         var opts = _jwtOptions.CurrentValue;
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, rec.TenantId, rec.OurSubject, jti, rec.SessionId, roles: null, scopes: null);
+        var accessToken = CreateAccessToken(opts, rec.TenantId, rec.OurSubject, jti, newSessionId, roles: null, scopes: null);
 
         return Task.FromResult(RefreshResult.Success(new TokenPair
         {
@@ -326,6 +345,16 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
     public Task<RevokeResult> RevokeAsync(Guid tenantId, Guid ourSubject, string refreshToken, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return Task.FromResult(RevokeResult.Fail("refresh_token_not_found"));
+        }
+
+        if (TryExtractTenantId(refreshToken, out var tokenTenantId) && tokenTenantId != tenantId)
+        {
+            return Task.FromResult(RevokeResult.Fail("forbidden"));
+        }
+
         var tokenHash = HashRefreshToken(refreshToken);
         if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
@@ -363,20 +392,45 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         return Task.FromResult(count);
     }
 
+    private static string CreateRefreshToken(Guid tenantId)
+        => $"rt1.{tenantId:N}.{Base64Url.Encode(RandomNumberGenerator.GetBytes(48))}";
+
+    private static bool TryExtractTenantId(string refreshToken, out Guid tenantId)
+    {
+        tenantId = default;
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return false;
+        }
+
+        // Format: rt1.{tenantIdN}.{random}
+        var parts = refreshToken.Split('.', 3, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], "rt1", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return Guid.TryParseExact(parts[1], "N", out tenantId);
+    }
+
     private string HashRefreshToken(string refreshToken)
     {
         var opts = _refreshHashing.CurrentValue;
         var bytes = Encoding.UTF8.GetBytes(refreshToken);
 
-        if (!string.IsNullOrWhiteSpace(opts.Pepper))
+        if (string.IsNullOrWhiteSpace(opts.Pepper))
         {
-            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
-            var mac = hmac.ComputeHash(bytes);
-            return Base64Url.Encode(mac);
+            throw new InvalidOperationException("RefreshTokenHashingOptions.Pepper must be configured");
         }
 
-        var hash = SHA256.HashData(bytes);
-        return Base64Url.Encode(hash);
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
+        var mac = hmac.ComputeHash(bytes);
+        return Base64Url.Encode(mac);
     }
 
 

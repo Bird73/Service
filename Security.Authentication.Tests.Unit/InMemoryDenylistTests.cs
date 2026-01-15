@@ -25,7 +25,7 @@ public sealed class InMemoryDenylistTests
 
         var env = new FakeOptionsMonitor<SecurityEnvironmentOptions>(new SecurityEnvironmentOptions { EnvironmentId = "test" });
         var safety = new FakeOptionsMonitor<SecuritySafetyOptions>(new SecuritySafetyOptions { Enabled = false, RequireEnvironmentId = false, EnforceTenantJwtIsolation = false });
-        var hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions { Pepper = "" });
+        var hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions { Pepper = "unit-test-pepper" });
 
         var hostEnvironment = new StubHostEnvironment { EnvironmentName = Environments.Development };
         var keys = new DefaultJwtKeyProvider(monitor);

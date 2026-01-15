@@ -230,17 +230,21 @@ public sealed class RepositoryTokenService : ITokenService
         var subject = await _subjects.FindAsync(tenantId, ourSubject, cancellationToken)
             ?? await _subjects.CreateAsync(tenantId, ourSubject, cancellationToken);
 
-        var sessionId = await _sessions.CreateSessionAsync(tenantId, ourSubject, _time.GetUtcNow(), cancellationToken);
+        // Spec: refresh token rotation creates a new refresh session each time.
+        // Initial issuance creates the first refresh session and uses it as the JWT session_id.
+        var sessionId = Guid.NewGuid();
         var jti = Guid.NewGuid().ToString("N");
         var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, tenant.TokenVersion, subject.TokenVersion, roles, scopes);
 
-        var refreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var refreshToken = CreateRefreshToken(tenantId);
         var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
         var refreshHash = HashRefreshToken(refreshToken);
+        var refreshLookup = ComputeTokenLookup(refreshHash);
         _ = await _refresh.CreateAsync(
             tenantId,
             ourSubject,
             sessionId,
+            refreshLookup,
             refreshHash,
             refreshExpires,
             issuedTenantTokenVersion: tenant.TokenVersion,
@@ -262,26 +266,35 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail("invalid_refresh_token");
         }
 
+        if (TryExtractTenantId(refreshToken, out var tokenTenantId) && tokenTenantId != tenantId)
+        {
+            return RefreshResult.Fail("invalid_tenant");
+        }
+
         var now = _time.GetUtcNow();
         var tokenHash = HashRefreshToken(refreshToken);
-        var dto = await _refresh.FindByHashAsync(tokenHash, cancellationToken);
+        var tokenLookup = ComputeTokenLookup(tokenHash);
+        var dto = await _refresh.FindByHashAsync(tenantId, tokenLookup, tokenHash, cancellationToken);
         if (dto is null)
         {
             return RefreshResult.Fail("invalid_refresh_token");
         }
 
-        // Tenant hardening: refresh token must be used under the same tenant context.
-        if (dto.TenantId != tenantId)
-        {
-            return RefreshResult.Fail("invalid_tenant");
-        }
+        // Tenant hardening is enforced by tenant-scoped lookup and token prefix.
 
         // refresh token reuse detection (rotation): old token used again => revoke whole session
         if (dto.RevokedAt is not null && dto.ReplacedByRefreshTokenId is not null)
         {
-            _ = await _refresh.RevokeAllBySessionAsync(dto.TenantId, dto.SessionId, now, cancellationToken);
-            _ = await _sessions.TerminateSessionAsync(dto.TenantId, dto.SessionId, now, reason: "refresh_reuse", cancellationToken);
+            _ = await _refresh.RevokeAllBySubjectAsync(dto.TenantId, dto.OurSubject, now, cancellationToken);
+            _ = await _sessions.TerminateAllAsync(dto.TenantId, dto.OurSubject, now, reason: "refresh_reuse", cancellationToken);
             return RefreshResult.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected);
+        }
+
+        // If the refresh session was terminated externally (governance/admin), surface it as session_terminated.
+        // Internal revocations use well-known reasons like refresh_revoke/refresh_reuse/rotated.
+        if (dto.RevokedAt is not null && dto.ReplacedByRefreshTokenId is null && !IsInternalRefreshRevocationReason(dto.RevocationReason))
+        {
+            return RefreshResult.Fail("session_terminated");
         }
 
         if (!dto.IsValid(now))
@@ -289,36 +302,31 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail(dto.RevokedAt is not null ? "revoked_refresh_token" : "expired_refresh_token");
         }
 
-        var sessionActive = await _sessions.IsSessionActiveAsync(dto.TenantId, dto.SessionId, cancellationToken);
-        if (!sessionActive)
-        {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
-            return RefreshResult.Fail("session_terminated");
-        }
+        // Session existence/active is implied by the refresh session row itself.
 
         var tenant = await _tenants.FindAsync(dto.TenantId, cancellationToken);
         var subject = await _subjects.FindAsync(dto.TenantId, dto.OurSubject, cancellationToken);
         if (tenant is null)
         {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "invalid_tenant", cancellationToken: cancellationToken);
             return RefreshResult.Fail("invalid_tenant");
         }
 
         if (tenant.Status != Birdsoft.Security.Abstractions.Models.TenantStatus.Active)
         {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "tenant_inactive", cancellationToken: cancellationToken);
             return RefreshResult.Fail(tenant.Status == Birdsoft.Security.Abstractions.Models.TenantStatus.Archived ? "tenant_archived" : "tenant_suspended");
         }
 
         if (subject is null)
         {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "invalid_subject", cancellationToken: cancellationToken);
             return RefreshResult.Fail("invalid_subject");
         }
 
         if (subject.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
         {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "subject_inactive", cancellationToken: cancellationToken);
             return RefreshResult.Fail(subject.Status == Birdsoft.Security.Abstractions.Models.UserStatus.Locked ? "user_locked" : "user_disabled");
         }
 
@@ -327,24 +335,30 @@ public sealed class RepositoryTokenService : ITokenService
 
         if (dto.IssuedTenantTokenVersion != currentTenantTv || dto.IssuedSubjectTokenVersion != currentSubjectTv)
         {
-            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.TokenHash, now, cancellationToken: cancellationToken);
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "token_version_mismatch", cancellationToken: cancellationToken);
             return RefreshResult.Fail("invalid_token_version");
         }
 
         // rotation (atomic): create new refresh and revoke old with replacedBy in the same transaction
         var opts = _jwtOptions.CurrentValue;
-        var newRefreshToken = Base64Url.Encode(RandomNumberGenerator.GetBytes(48));
+        var newRefreshToken = CreateRefreshToken(dto.TenantId);
         var newHash = HashRefreshToken(newRefreshToken);
+        var newLookup = ComputeTokenLookup(newHash);
+        var newSessionId = Guid.NewGuid();
         var newDto = await _refresh.TryRotateAsync(
             tenantId: dto.TenantId,
             ourSubject: dto.OurSubject,
-            sessionId: dto.SessionId,
+            currentSessionId: dto.SessionId,
+            currentTokenLookup: dto.TokenLookup,
             currentTokenHash: dto.TokenHash,
+            newSessionId: newSessionId,
+            newTokenLookup: newLookup,
             newTokenHash: newHash,
             expiresAt: dto.ExpiresAt,
             now: now,
             issuedTenantTokenVersion: currentTenantTv,
             issuedSubjectTokenVersion: currentSubjectTv,
+            revokeReason: "rotated",
             cancellationToken);
 
         if (newDto is null)
@@ -354,7 +368,7 @@ public sealed class RepositoryTokenService : ITokenService
         }
 
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, dto.SessionId, currentTenantTv, currentSubjectTv, roles: null, scopes: null);
+        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, newSessionId, currentTenantTv, currentSubjectTv, roles: null, scopes: null);
 
         return RefreshResult.Success(new TokenPair
         {
@@ -371,8 +385,14 @@ public sealed class RepositoryTokenService : ITokenService
             return RevokeResult.Fail("invalid_request");
         }
 
+        if (TryExtractTenantId(refreshToken, out var tokenTenantId) && tokenTenantId != tenantId)
+        {
+            return RevokeResult.Fail("forbidden");
+        }
+
         var tokenHash = HashRefreshToken(refreshToken);
-        var dto = await _refresh.FindByHashAsync(tokenHash, cancellationToken);
+        var tokenLookup = ComputeTokenLookup(tokenHash);
+        var dto = await _refresh.FindByHashAsync(tenantId, tokenLookup, tokenHash, cancellationToken);
         if (dto is null)
         {
             return RevokeResult.Fail("refresh_token_not_found");
@@ -384,7 +404,7 @@ public sealed class RepositoryTokenService : ITokenService
         }
 
         var now = _time.GetUtcNow();
-        var ok = await _refresh.RevokeAsync(tenantId, ourSubject, tokenHash, now, cancellationToken: cancellationToken);
+        var ok = await _refresh.RevokeAsync(tenantId, ourSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: "refresh_revoke", cancellationToken: cancellationToken);
         _ = await _sessions.TerminateSessionAsync(tenantId, dto.SessionId, now, reason: "refresh_revoke", cancellationToken);
         return ok ? RevokeResult.Success() : RevokeResult.Fail("revoke_failed");
     }
@@ -398,6 +418,48 @@ public sealed class RepositoryTokenService : ITokenService
         _ = await _sessions.TerminateAllAsync(tenantId, ourSubject, now, reason: "revoke_all", cancellationToken);
         return await _refresh.RevokeAllBySubjectAsync(tenantId, ourSubject, now, cancellationToken);
     }
+
+    private static string ComputeTokenLookup(string tokenHash)
+        => string.IsNullOrWhiteSpace(tokenHash)
+            ? string.Empty
+            : (tokenHash.Length <= 16 ? tokenHash : tokenHash[..16]);
+
+    private static string CreateRefreshToken(Guid tenantId)
+        => $"rt1.{tenantId:N}.{Base64Url.Encode(RandomNumberGenerator.GetBytes(48))}";
+
+    private static bool TryExtractTenantId(string refreshToken, out Guid tenantId)
+    {
+        tenantId = default;
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            return false;
+        }
+
+        // Format: rt1.{tenantIdN}.{random}
+        var parts = refreshToken.Split('.', 3, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            return false;
+        }
+
+        if (!string.Equals(parts[0], "rt1", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return Guid.TryParseExact(parts[1], "N", out tenantId);
+    }
+
+    private static bool IsInternalRefreshRevocationReason(string? reason)
+        => !string.IsNullOrWhiteSpace(reason)
+           && reason is "refresh_revoke"
+               or "refresh_reuse"
+               or "rotated"
+               or "tenant_inactive"
+               or "subject_inactive"
+               or "token_version_mismatch"
+               or "invalid_tenant"
+               or "invalid_subject";
 
     private string CreateAccessToken(
         JwtOptions opts,
@@ -794,14 +856,14 @@ public sealed class RepositoryTokenService : ITokenService
         var bytes = Encoding.UTF8.GetBytes(refreshToken);
         var opts = _refreshHashing.CurrentValue;
 
-        if (!string.IsNullOrWhiteSpace(opts.Pepper))
+        // Security requirement: use HMAC-SHA256 with server-side secret (pepper).
+        if (string.IsNullOrWhiteSpace(opts.Pepper))
         {
-            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
-            var mac = hmac.ComputeHash(bytes);
-            return Base64Url.Encode(mac);
+            throw new InvalidOperationException("RefreshTokenHashingOptions.Pepper must be configured");
         }
 
-        var hash = SHA256.HashData(bytes);
-        return Base64Url.Encode(hash);
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(opts.Pepper));
+        var mac = hmac.ComputeHash(bytes);
+        return Base64Url.Encode(mac);
     }
 }

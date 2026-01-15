@@ -13,13 +13,25 @@ public sealed class SecurityDbContext : DbContext
     public DbSet<TenantEntity> Tenants => Set<TenantEntity>();
     public DbSet<SubjectEntity> Subjects => Set<SubjectEntity>();
     public DbSet<AuthStateEntity> AuthStates => Set<AuthStateEntity>();
-    public DbSet<RefreshTokenEntity> RefreshTokens => Set<RefreshTokenEntity>();
+    public DbSet<RefreshTokenEntity> RefreshSessions => Set<RefreshTokenEntity>();
     public DbSet<ExternalIdentityEntity> ExternalIdentities => Set<ExternalIdentityEntity>();
-    public DbSet<LocalAccountEntity> LocalAccounts => Set<LocalAccountEntity>();
+    public DbSet<LocalAccountEntity> SubjectCredentials => Set<LocalAccountEntity>();
     public DbSet<AccessTokenDenylistEntity> AccessTokenDenylist => Set<AccessTokenDenylistEntity>();
     public DbSet<OidcProviderConfigEntity> OidcProviders => Set<OidcProviderConfigEntity>();
-    public DbSet<TokenSessionEntity> TokenSessions => Set<TokenSessionEntity>();
     public DbSet<AuthEventEntity> AuthEvents => Set<AuthEventEntity>();
+
+    // Authorization (RBAC)
+    public DbSet<RoleEntity> Roles => Set<RoleEntity>();
+    public DbSet<PermissionEntity> Permissions => Set<PermissionEntity>();
+    public DbSet<RolePermissionEntity> RolePermissions => Set<RolePermissionEntity>();
+    public DbSet<SubjectRoleEntity> SubjectRoles => Set<SubjectRoleEntity>();
+    public DbSet<SubjectPermissionEntity> SubjectPermissions => Set<SubjectPermissionEntity>();
+    public DbSet<SubjectScopeEntity> SubjectScopes => Set<SubjectScopeEntity>();
+    public DbSet<AuthzTenantVersionEntity> AuthzTenantVersions => Set<AuthzTenantVersionEntity>();
+
+    // Platform products + tenant entitlements
+    public DbSet<ProductEntity> Products => Set<ProductEntity>();
+    public DbSet<TenantProductEntity> TenantProducts => Set<TenantProductEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -34,6 +46,10 @@ public sealed class SecurityDbContext : DbContext
         {
             b.ToTable("subjects");
             b.HasKey(x => new { x.TenantId, x.OurSubject });
+
+            b.Property(x => x.DisplayName).HasMaxLength(200);
+            b.HasIndex(x => new { x.TenantId, x.Status });
+            b.HasIndex(x => new { x.TenantId, x.UpdatedAt });
         });
 
         modelBuilder.Entity<AuthStateEntity>(b =>
@@ -42,20 +58,26 @@ public sealed class SecurityDbContext : DbContext
             b.HasKey(x => x.State);
             b.Property(x => x.State).HasMaxLength(200);
             b.Property(x => x.Provider).HasMaxLength(64);
-            b.HasIndex(x => x.ExpiresAt);
-            b.HasIndex(x => x.UsedAt);
+            b.HasIndex(x => new { x.TenantId, x.ExpiresAt });
+            b.HasIndex(x => new { x.TenantId, x.UsedAt });
         });
 
         modelBuilder.Entity<RefreshTokenEntity>(b =>
         {
-            b.ToTable("refresh_tokens");
+            // Spec: refresh_sessions (one row per refresh session; rotation creates a new session row)
+            b.ToTable("refresh_sessions");
             b.HasKey(x => x.Id);
             b.Property(x => x.TokenHash).HasMaxLength(128);
-            b.HasIndex(x => x.TokenHash).IsUnique();
+            b.Property(x => x.TokenLookup).HasMaxLength(32);
+            b.Property(x => x.RevocationReason).HasMaxLength(64);
+
+            // Tenant-leading uniqueness/indexes.
+            b.HasIndex(x => new { x.TenantId, x.TokenHash }).IsUnique();
+            b.HasIndex(x => new { x.TenantId, x.TokenLookup });
             b.HasIndex(x => new { x.TenantId, x.OurSubject });
-            b.HasIndex(x => new { x.TenantId, x.SessionId });
-            b.HasIndex(x => x.ExpiresAt);
-            b.HasIndex(x => x.RevokedAt);
+            b.HasIndex(x => new { x.TenantId, x.SessionId }).IsUnique();
+            b.HasIndex(x => new { x.TenantId, x.ExpiresAt });
+            b.HasIndex(x => new { x.TenantId, x.RevokedAt });
 
             // Common query pattern: list/cleanup by tenant+subject and validity window.
             b.HasIndex(x => new { x.TenantId, x.OurSubject, x.RevokedAt, x.ExpiresAt });
@@ -73,19 +95,28 @@ public sealed class SecurityDbContext : DbContext
 
             b.HasIndex(x => new { x.TenantId, x.Enabled });
 
-            // Ensure one subject isn't bound to multiple external identities within a tenant.
-            b.HasIndex(x => new { x.TenantId, x.OurSubject }).IsUnique();
+            // Support multiple providers per subject (e.g. Google + Microsoft). Still index for lookup.
+            b.HasIndex(x => new { x.TenantId, x.OurSubject });
+
+            b.HasIndex(x => new { x.TenantId, x.Provider });
         });
 
         modelBuilder.Entity<LocalAccountEntity>(b =>
         {
-            b.ToTable("local_accounts");
+            // Spec: subject_credentials (self-managed username/password; can be disabled but schema must exist)
+            b.ToTable("subject_credentials");
             b.HasKey(x => x.Id);
             b.Property(x => x.UsernameOrEmail).HasMaxLength(256);
             b.Property(x => x.PasswordHash).HasMaxLength(512);
             b.Property(x => x.PasswordSalt).HasMaxLength(256);
             b.HasIndex(x => new { x.TenantId, x.UsernameOrEmail }).IsUnique();
-            b.HasIndex(x => new { x.TenantId, x.OurSubject });
+
+            // One local credential per subject per tenant.
+            b.HasIndex(x => new { x.TenantId, x.OurSubject }).IsUnique();
+
+            b.Property(x => x.HashVersion);
+            b.Property(x => x.FailedAccessCount);
+            b.HasIndex(x => new { x.TenantId, x.LockedUntil });
         });
 
         modelBuilder.Entity<AccessTokenDenylistEntity>(b =>
@@ -93,7 +124,7 @@ public sealed class SecurityDbContext : DbContext
             b.ToTable("access_token_denylist");
             b.HasKey(x => new { x.TenantId, x.Jti });
             b.Property(x => x.Jti).HasMaxLength(64);
-            b.HasIndex(x => x.ExpiresAt);
+            b.HasIndex(x => new { x.TenantId, x.ExpiresAt });
         });
 
         modelBuilder.Entity<OidcProviderConfigEntity>(b =>
@@ -107,40 +138,186 @@ public sealed class SecurityDbContext : DbContext
             b.Property(x => x.ClientSecret).HasMaxLength(512);
             b.Property(x => x.CallbackPath).HasMaxLength(256);
             b.Property(x => x.ScopesJson).HasMaxLength(2048);
-            b.HasIndex(x => x.Enabled);
-        });
-
-        modelBuilder.Entity<TokenSessionEntity>(b =>
-        {
-            b.ToTable("token_sessions");
-            b.HasKey(x => new { x.TenantId, x.SessionId });
-            b.Property(x => x.TerminationReason).HasMaxLength(256);
-            b.HasIndex(x => new { x.TenantId, x.OurSubject });
-            b.HasIndex(x => x.TerminatedAt);
+            b.HasIndex(x => new { x.TenantId, x.Enabled });
         });
 
         modelBuilder.Entity<AuthEventEntity>(b =>
         {
-            b.ToTable("auth_events");
+            // Spec: security_audit_logs (append-only)
+            b.ToTable("security_audit_logs");
             b.HasKey(x => x.Id);
             b.Property(x => x.Outcome).HasMaxLength(64);
             b.Property(x => x.Code).HasMaxLength(128);
             b.Property(x => x.Detail).HasMaxLength(2048);
+
+            b.Property(x => x.Provider).HasMaxLength(64);
+            b.Property(x => x.Issuer).HasMaxLength(512);
+            b.Property(x => x.ErrorCode).HasMaxLength(128);
 
             b.Property(x => x.CorrelationId).HasMaxLength(64);
             b.Property(x => x.TraceId).HasMaxLength(64);
             b.Property(x => x.Ip).HasMaxLength(64);
             b.Property(x => x.UserAgent).HasMaxLength(256);
 
-            b.HasIndex(x => x.OccurredAt);
+            // Tenant-leading indexes.
             b.HasIndex(x => x.TenantId);
-            b.HasIndex(x => new { x.TenantId, x.OurSubject });
-            b.HasIndex(x => x.SessionId);
-            b.HasIndex(x => x.Type);
             b.HasIndex(x => new { x.TenantId, x.OccurredAt });
+            b.HasIndex(x => new { x.TenantId, x.OurSubject });
             b.HasIndex(x => new { x.TenantId, x.OurSubject, x.OccurredAt });
+            b.HasIndex(x => new { x.TenantId, x.SessionId });
+            b.HasIndex(x => new { x.TenantId, x.Type });
+
+            // Query by event code over time.
+            b.HasIndex(x => new { x.TenantId, x.Code, x.OccurredAt });
+        });
+
+        // Authorization / RBAC tables
+        modelBuilder.Entity<RoleEntity>(b =>
+        {
+            b.ToTable("roles");
+            b.HasKey(x => new { x.TenantId, x.RoleId });
+            b.Property(x => x.RoleName).HasMaxLength(128);
+            b.Property(x => x.Description).HasMaxLength(512);
+
+            b.HasIndex(x => new { x.TenantId, x.RoleName }).IsUnique();
+            b.HasIndex(x => new { x.TenantId, x.UpdatedAt });
+        });
+
+        modelBuilder.Entity<PermissionEntity>(b =>
+        {
+            b.ToTable("permissions");
+            b.HasKey(x => x.PermId);
+            b.Property(x => x.PermKey).HasMaxLength(256);
+            b.Property(x => x.ProductKey).HasMaxLength(64);
+            b.Property(x => x.Description).HasMaxLength(512);
+            b.HasIndex(x => x.PermKey).IsUnique();
+
+            // Optional: allow listing permissions by product.
+            b.HasIndex(x => x.ProductKey);
+        });
+
+        modelBuilder.Entity<ProductEntity>(b =>
+        {
+            b.ToTable("products");
+            b.HasKey(x => x.ProductId);
+            b.Property(x => x.ProductKey).HasMaxLength(64);
+            b.Property(x => x.DisplayName).HasMaxLength(200);
+            b.Property(x => x.Description).HasMaxLength(1024);
+            b.HasIndex(x => x.ProductKey).IsUnique();
+            b.HasIndex(x => x.Status);
+        });
+
+        modelBuilder.Entity<TenantProductEntity>(b =>
+        {
+            b.ToTable("tenant_products");
+            b.HasKey(x => new { x.TenantId, x.ProductKey });
+            b.Property(x => x.ProductKey).HasMaxLength(64);
+            b.Property(x => x.PlanJson).HasMaxLength(4096);
+            b.HasIndex(x => new { x.TenantId, x.Status });
+            b.HasIndex(x => new { x.TenantId, x.ProductKey, x.Status });
+            b.HasIndex(x => new { x.ProductKey, x.Status });
+            b.HasIndex(x => new { x.TenantId, x.EndAt });
+        });
+
+        modelBuilder.Entity<RolePermissionEntity>(b =>
+        {
+            b.ToTable("role_permissions");
+            b.HasKey(x => new { x.TenantId, x.RoleId, x.PermId });
+
+            b.HasOne<RoleEntity>()
+                .WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.RoleId })
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne<PermissionEntity>()
+                .WithMany()
+                .HasForeignKey(x => x.PermId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasIndex(x => new { x.TenantId, x.PermId });
+        });
+
+        modelBuilder.Entity<SubjectRoleEntity>(b =>
+        {
+            b.ToTable("subject_roles");
+            b.HasKey(x => new { x.TenantId, x.OurSubject, x.RoleId });
+
+            b.HasOne<SubjectEntity>()
+                .WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.OurSubject })
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne<RoleEntity>()
+                .WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.RoleId })
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasIndex(x => new { x.TenantId, x.RoleId });
+        });
+
+        modelBuilder.Entity<SubjectPermissionEntity>(b =>
+        {
+            b.ToTable("subject_permissions");
+            b.HasKey(x => new { x.TenantId, x.OurSubject, x.PermId });
+
+            b.HasOne<SubjectEntity>()
+                .WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.OurSubject })
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasOne<PermissionEntity>()
+                .WithMany()
+                .HasForeignKey(x => x.PermId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasIndex(x => new { x.TenantId, x.PermId });
+        });
+
+        modelBuilder.Entity<SubjectScopeEntity>(b =>
+        {
+            b.ToTable("subject_scopes");
+            b.HasKey(x => new { x.TenantId, x.OurSubject, x.ScopeKey });
+            b.Property(x => x.ScopeKey).HasMaxLength(128);
+
+            b.HasOne<SubjectEntity>()
+                .WithMany()
+                .HasForeignKey(x => new { x.TenantId, x.OurSubject })
+                .OnDelete(DeleteBehavior.Cascade);
+
+            b.HasIndex(x => new { x.TenantId, x.ScopeKey });
+        });
+
+        modelBuilder.Entity<AuthzTenantVersionEntity>(b =>
+        {
+            b.ToTable("authz_tenant_versions");
+            b.HasKey(x => x.TenantId);
+            b.HasIndex(x => new { x.TenantId, x.UpdatedAt });
         });
 
         base.OnModelCreating(modelBuilder);
+    }
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        EnforceAppendOnlyAudit();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        EnforceAppendOnlyAudit();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private void EnforceAppendOnlyAudit()
+    {
+        // Spec: security_audit_logs is append-only.
+        var invalid = ChangeTracker.Entries<AuthEventEntity>()
+            .Any(e => e.State is EntityState.Modified or EntityState.Deleted);
+
+        if (invalid)
+        {
+            throw new InvalidOperationException("security_audit_logs is append-only (Update/Delete are not allowed)");
+        }
     }
 }

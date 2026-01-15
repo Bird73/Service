@@ -20,7 +20,7 @@ public sealed class EfLocalAccountRepository : ILocalAccountRepository
     public async Task<LocalAccountProfileDto?> FindByUsernameAsync(Guid tenantId, string usernameOrEmail, CancellationToken cancellationToken = default)
     {
         var normalized = Normalize(usernameOrEmail);
-        var entity = await _db.LocalAccounts.AsNoTracking()
+        var entity = await _db.SubjectCredentials.AsNoTracking()
             .FirstOrDefaultAsync(x => x.TenantId == tenantId && x.UsernameOrEmail == normalized, cancellationToken);
 
         return entity is null
@@ -40,6 +40,8 @@ public sealed class EfLocalAccountRepository : ILocalAccountRepository
         var iterations = DefaultIterations;
         var hash = HashPassword(password, salt, iterations);
 
+        var now = DateTimeOffset.UtcNow;
+
         var entity = new LocalAccountEntity
         {
             Id = Guid.NewGuid(),
@@ -49,10 +51,15 @@ public sealed class EfLocalAccountRepository : ILocalAccountRepository
             PasswordSalt = Convert.ToBase64String(salt),
             PasswordIterations = iterations,
             PasswordHash = Convert.ToBase64String(hash),
-            CreatedAt = DateTimeOffset.UtcNow,
+            HashVersion = 1,
+            LastPasswordChangeAt = now,
+            FailedAccessCount = 0,
+            LockedUntil = null,
+            CreatedAt = now,
+            UpdatedAt = now,
         };
 
-        _db.LocalAccounts.Add(entity);
+        _db.SubjectCredentials.Add(entity);
         await _db.SaveChangesAsync(cancellationToken);
 
         return new LocalAccountProfileDto
@@ -66,7 +73,7 @@ public sealed class EfLocalAccountRepository : ILocalAccountRepository
     public async Task<Guid?> VerifyPasswordAsync(Guid tenantId, string usernameOrEmail, string password, CancellationToken cancellationToken = default)
     {
         var normalized = Normalize(usernameOrEmail);
-        var entity = await _db.LocalAccounts.AsNoTracking()
+        var entity = await _db.SubjectCredentials.AsNoTracking()
             .FirstOrDefaultAsync(x => x.TenantId == tenantId && x.UsernameOrEmail == normalized, cancellationToken);
 
         if (entity is null)

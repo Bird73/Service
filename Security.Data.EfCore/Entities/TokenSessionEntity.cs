@@ -10,4 +10,9 @@ public sealed class TokenSessionEntity
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? TerminatedAt { get; set; }
     public string? TerminationReason { get; set; }
+
+    public string? ClientId { get; set; }
+    public string? DeviceId { get; set; }
+    public string? Ip { get; set; }
+    public string? UserAgent { get; set; }
 }

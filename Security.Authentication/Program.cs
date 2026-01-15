@@ -83,7 +83,9 @@ builder.Services.AddOptions<BruteForceProtectionOptions>()
     .Bind(builder.Configuration.GetSection(BruteForceProtectionOptions.SectionName));
 
 builder.Services.AddOptions<RefreshTokenHashingOptions>()
-    .Bind(builder.Configuration.GetSection(RefreshTokenHashingOptions.SectionName));
+    .Bind(builder.Configuration.GetSection(RefreshTokenHashingOptions.SectionName))
+    .Validate(o => !string.IsNullOrWhiteSpace(o.Pepper), "Security:RefreshTokenHashing:Pepper is required")
+    .ValidateOnStart();
 
 builder.Services.AddOptions<MfaOptions>()
     .Bind(builder.Configuration.GetSection(MfaOptions.SectionName));

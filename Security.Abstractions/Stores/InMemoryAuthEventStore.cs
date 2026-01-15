@@ -31,6 +31,11 @@ public sealed class InMemoryAuthEventStore : IAuthEventStore
     public Task<IReadOnlyList<AuthEvent>> QueryAsync(AuthEventQuery query, CancellationToken cancellationToken = default)
     {
         _ = cancellationToken;
+        if (query.TenantId is null)
+        {
+            throw new ArgumentException("tenantId is required for audit log queries", nameof(query));
+        }
+
         List<AuthEvent> snapshot;
         lock (_gate)
         {
@@ -39,10 +44,8 @@ public sealed class InMemoryAuthEventStore : IAuthEventStore
 
         IEnumerable<AuthEvent> q = snapshot;
 
-        if (query.TenantId is Guid tenantId)
-        {
-            q = q.Where(x => x.TenantId == tenantId);
-        }
+        var tenantId = query.TenantId.Value;
+        q = q.Where(x => x.TenantId == tenantId);
 
         if (query.OurSubject is Guid ourSubject)
         {
