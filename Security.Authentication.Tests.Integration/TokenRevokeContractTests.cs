@@ -188,4 +188,34 @@ public sealed class TokenRevokeContractTests
             Assert.Equal("forbidden", body.Error!.Code);
         });
     }
+
+    [Fact]
+    public async Task Revoke_When_SubjectTokenVersion_Bumped_Returns_401_InvalidTokenVersion()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+            var pair = await IssueTokensAsync(factory, tenantId, ourSubject);
+
+            // Bump subject token version after access token was issued.
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<SecurityDbContext>();
+                await db.Database.EnsureCreatedAsync();
+                var subject = await db.Subjects.FirstAsync(s => s.TenantId == tenantId && s.OurSubject == ourSubject);
+                subject.TokenVersion += 1;
+                await db.SaveChangesAsync();
+            }
+
+            using var revokeReq = CreateRevokeRequest(tenantId, pair.AccessToken, new TokenRevokeRequest(RefreshToken: pair.RefreshToken, AllDevices: false));
+            var revokeRes = await client.SendAsync(revokeReq);
+            Assert.Equal(HttpStatusCode.Unauthorized, revokeRes.StatusCode);
+
+            var body = await revokeRes.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.False(body!.Success);
+            Assert.Equal("invalid_token_version", body.Error!.Code);
+        });
+    }
 }

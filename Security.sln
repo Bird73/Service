@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Data.EfCore", "Sec
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Authentication.Tests.Integration", "Security.Authentication.Tests.Integration\Security.Authentication.Tests.Integration.csproj", "{8894BAC7-2844-4C46-9DB9-A45F5A3CB487}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Bootstrap.Tests.Integration", "Security.Bootstrap.Tests.Integration\Security.Bootstrap.Tests.Integration.csproj", "{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -125,6 +127,18 @@ Global
 		{8894BAC7-2844-4C46-9DB9-A45F5A3CB487}.Release|x64.Build.0 = Release|Any CPU
 		{8894BAC7-2844-4C46-9DB9-A45F5A3CB487}.Release|x86.ActiveCfg = Release|Any CPU
 		{8894BAC7-2844-4C46-9DB9-A45F5A3CB487}.Release|x86.Build.0 = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|x64.Build.0 = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Debug|x86.Build.0 = Debug|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x64.ActiveCfg = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x64.Build.0 = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x86.ActiveCfg = Release|Any CPU
+		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

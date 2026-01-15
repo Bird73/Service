@@ -15,6 +15,7 @@ using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Abstractions.Tenancy;
 using Birdsoft.Security.Authentication;
 using Birdsoft.Security.Authentication.Auth;
+using Birdsoft.Security.Authentication.Bootstrap;
 using Birdsoft.Security.Authentication.Jwt;
 using Birdsoft.Security.Authentication.Mfa;
 using Birdsoft.Security.Authentication.Observability.Health;
@@ -255,6 +256,12 @@ app.UseMiddleware<TenantResolutionMiddleware>();
 var api = app.MapGroup("/api/v1");
 var auth = api.MapGroup("/auth");
 auth.AddEndpointFilter(new MetricsEndpointFilter("auth"));
+
+// Bootstrap endpoint for initializing an empty DB (guarded by config + optional key).
+if (app.Configuration.GetValue<bool>("Bootstrap:Enabled"))
+{
+    api.MapBootstrapEndpoints();
+}
 
 // Test-only endpoints (integration test host can enable via TestEndpoints:Enabled=true).
 if (app.Configuration.GetValue<bool>("TestEndpoints:Enabled"))

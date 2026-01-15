@@ -11,12 +11,16 @@ using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authorization.Evaluation;
 using Birdsoft.Security.Authorization.Api.Auth;
 using Birdsoft.Security.Authorization.Api;
+using Birdsoft.Security.Authorization.Api.Authz;
 using Birdsoft.Security.Authorization.Api.Observability.Health;
 using Birdsoft.Security.Authorization.Api.Observability.Logging;
 using Birdsoft.Security.Authorization.Stores;
+using AuthzEvaluator = Birdsoft.Security.Authorization.Evaluation.IAuthorizationEvaluator;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
@@ -147,6 +151,9 @@ builder.Services.AddAuthorization(o =>
 });
 builder.Services.AddSingleton<IPostConfigureOptions<JwtBearerOptions>, BirdsoftJwtBearerPostConfigureOptions>();
 
+// Emit spec-like JSON bodies for 401/403 produced by authorization middleware.
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ApiAuthorizationMiddlewareResultHandler>();
+
 var dbConn = builder.Configuration.GetConnectionString("SecurityDb");
 var useEf = !string.IsNullOrWhiteSpace(dbConn);
 
@@ -186,7 +193,7 @@ if (!useEf)
 }
 
 builder.Services.AddScoped<SimpleRbacAuthorizationEvaluator>();
-builder.Services.AddScoped<IAuthorizationEvaluator>(sp =>
+builder.Services.AddScoped<AuthzEvaluator>(sp =>
     new EntitlementAuthorizationEvaluator(
         sp.GetRequiredService<SimpleRbacAuthorizationEvaluator>(),
         sp.GetRequiredService<IPermissionCatalogStore>(),
@@ -238,7 +245,7 @@ var api = app.MapGroup("/api/v1");
 var authz = api.MapGroup("/authz");
 authz.AddEndpointFilter(new MetricsEndpointFilter("authz"));
 
-authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, IAuthorizationEvaluator evaluator, IAuditEventWriter audit, CancellationToken ct) =>
+authz.MapPost("/check", async (HttpContext http, AuthzCheckRequest request, AuthzEvaluator evaluator, IAuditEventWriter audit, CancellationToken ct) =>
 {
     static Guid? ResolveTenantId(HttpContext http)
     {

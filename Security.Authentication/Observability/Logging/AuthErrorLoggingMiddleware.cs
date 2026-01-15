@@ -33,18 +33,25 @@ public sealed class AuthErrorLoggingMiddleware
             var ip = http.Connection.RemoteIpAddress?.ToString();
             var tenantHeader = http.Request.Headers.TryGetValue("X-Tenant-Id", out var h) ? h.ToString() : null;
 
-            errorLog.Log(
-                LogLevel.Error,
-                ex,
-                "Unhandled exception. method={Method} path={Path} query={Query} status={Status} traceId={TraceId} correlationId={CorrelationId} tenantHeader={TenantHeader} ip={Ip}",
-                http.Request.Method,
-                http.Request.Path.ToString(),
-                http.Request.QueryString.ToString(),
-                http.Response.StatusCode,
-                traceId,
-                correlationId,
-                tenantHeader,
-                ip);
+            try
+            {
+                errorLog.Log(
+                    LogLevel.Error,
+                    ex,
+                    "Unhandled exception. method={Method} path={Path} query={Query} status={Status} traceId={TraceId} correlationId={CorrelationId} tenantHeader={TenantHeader} ip={Ip}",
+                    http.Request.Method,
+                    http.Request.Path.ToString(),
+                    http.Request.QueryString.ToString(),
+                    http.Response.StatusCode,
+                    traceId,
+                    correlationId,
+                    tenantHeader,
+                    ip);
+            }
+            catch
+            {
+                // Logging must never break the request pipeline.
+            }
 
             if (http.Response.HasStarted)
             {

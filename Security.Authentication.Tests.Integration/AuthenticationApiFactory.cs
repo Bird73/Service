@@ -33,6 +33,7 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
         public ITenantRepository? Tenants { get; init; }
         public ISubjectRepository? Subjects { get; init; }
         public IAuthorizationDataStore? Authz { get; init; }
+        public IAuthEventStore? AuthEvents { get; init; }
         public IPasswordAuthenticator? Password { get; init; }
         public IBruteForceProtection? BruteForce { get; init; }
         public IMfaPolicyProvider? MfaPolicy { get; init; }
@@ -137,6 +138,12 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
                 services.AddScoped<IAuthStateService, RepositoryAuthStateService>();
                 services.AddScoped<IExternalIdentityStore, ExternalIdentityStoreFromRepository>();
                 services.AddScoped<ITokenService, RepositoryTokenService>();
+            }
+
+            if (_overrides.AuthEvents is not null)
+            {
+                services.RemoveAll<IAuthEventStore>();
+                services.AddSingleton(_overrides.AuthEvents);
             }
 
             // Replace dependencies so each test can deterministically drive endpoint branches.

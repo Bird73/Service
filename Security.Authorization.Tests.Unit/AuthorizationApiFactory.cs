@@ -2,6 +2,7 @@ namespace Birdsoft.Security.Authorization.Tests.Unit;
 
 using Birdsoft.Infrastructure.Logging.Abstractions;
 using Birdsoft.Security.Authorization.Api.Observability.Logging;
+using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Data.EfCore;
 using Microsoft.EntityFrameworkCore;
@@ -31,6 +32,8 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
         public string? SecurityDbConnectionString { get; init; }
 
         public string? AuthErrorLogRootDirectory { get; init; }
+
+        public IAuthEventStore? AuthEvents { get; init; }
 
         public string JwtIssuer { get; init; } = "https://security.authz.test";
         public string JwtAudience { get; init; } = "service";
@@ -109,6 +112,12 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
 
             services.AddDbContext<SecurityDbContext>(o => o.UseSqlite(_overrides.SecurityDbConnectionString));
             services.AddSecurityEfCoreDataAccess();
+
+            if (_overrides.AuthEvents is not null)
+            {
+                services.RemoveAll<IAuthEventStore>();
+                services.AddSingleton(_overrides.AuthEvents);
+            }
         });
     }
 }
