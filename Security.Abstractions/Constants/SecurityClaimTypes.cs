@@ -41,9 +41,26 @@ public static class SecurityClaimTypes
     /// <summary>Session ID（可撤銷/強制登出用）</summary>
     public const string SessionId = "session_id";
 
+    /// <summary>
+    /// Token type（token_type）
+    /// - access: access token (Bearer)
+    /// Note: refresh tokens are frozen as opaque (non-JWT) and therefore do not carry token_type.
+    /// </summary>
+    public const string TokenType = "token_type";
+
+    /// <summary>
+    /// Token plane（token_plane）
+    /// - tenant: tenant-scoped access token (must include tenant_id)
+    /// - platform: cross-tenant platform access token (must NOT include tenant_id)
+    /// </summary>
+    public const string TokenPlane = "token_plane";
+
     /// <summary>租戶 Token Version（強制重新登入用）</summary>
     public const string TenantTokenVersion = "tenant_tv";
 
     /// <summary>Subject Token Version（強制重新登入用）</summary>
     public const string SubjectTokenVersion = "subject_tv";
+
+    /// <summary>Platform Token Version（平台層立即失效用）</summary>
+    public const string PlatformTokenVersion = "platform_tv";
 }

@@ -14,6 +14,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 
 public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOptions<JwtBearerOptions>
 {
@@ -22,19 +23,22 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
     private readonly IOptionsMonitor<SecuritySafetyOptions> _safetyOptions;
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IJwtKeyProvider _keys;
+    private readonly IServiceScopeFactory _scopeFactory;
 
     public BirdsoftJwtBearerPostConfigureOptions(
         IOptionsMonitor<JwtOptions> jwtOptions,
         IOptionsMonitor<SecurityEnvironmentOptions> envOptions,
         IOptionsMonitor<SecuritySafetyOptions> safetyOptions,
         IHostEnvironment hostEnvironment,
-        IJwtKeyProvider keys)
+        IJwtKeyProvider keys,
+        IServiceScopeFactory scopeFactory)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
         _safetyOptions = safetyOptions;
         _hostEnvironment = hostEnvironment;
         _keys = keys;
+        _scopeFactory = scopeFactory;
     }
 
     public void PostConfigure(string? name, JwtBearerOptions options)
@@ -92,6 +96,48 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
 
             if (keys.Count == 0)
             {
+                // Commercial governance: DB-backed signing keys (active + inactive) for verification.
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var store = scope.ServiceProvider.GetService<IJwtSigningKeyStore>();
+                    if (store is not null && store.HasAnyAsync().GetAwaiter().GetResult())
+                    {
+                        var mats = store.GetVerificationKeysAsync().GetAwaiter().GetResult();
+                        foreach (var m in mats)
+                        {
+                            if (!string.IsNullOrWhiteSpace(kid) && !string.Equals(m.Kid, kid, StringComparison.Ordinal))
+                            {
+                                continue;
+                            }
+
+                            var mAlg = string.IsNullOrWhiteSpace(m.Algorithm) ? "RS256" : m.Algorithm.Trim();
+                            if (!string.IsNullOrWhiteSpace(alg) && !string.Equals(mAlg, alg, StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            if (mAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var rsa = TryLoadRsa(m.PublicKeyPem);
+                                if (rsa is not null)
+                                {
+                                    keys.Add(new RsaSecurityKey(rsa) { KeyId = m.Kid });
+                                }
+
+                                continue;
+                            }
+
+                            if (mAlg.StartsWith("HS", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.SymmetricKey))
+                            {
+                                keys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(m.SymmetricKey)) { KeyId = m.Kid });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (keys.Count == 0)
+            {
                 if (_keys.Algorithm.Equals("RS256", StringComparison.OrdinalIgnoreCase))
                 {
                     var rsa = _keys.GetRsaPublicKey();
@@ -121,23 +167,6 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             return Guid.TryParse(raw, out tenantId);
         }
 
-        static bool IsPlatformAdmin(ClaimsPrincipal principal)
-        {
-            var scopes = principal.FindAll(SecurityClaimTypes.Scope).Select(c => c.Value)
-                .Concat((principal.FindFirst(SecurityClaimTypes.Scopes)?.Value ?? string.Empty)
-                    .Split(' ', StringSplitOptions.RemoveEmptyEntries));
-
-            if (scopes.Any(s => string.Equals(s, "security.platform_admin", StringComparison.OrdinalIgnoreCase)))
-            {
-                return true;
-            }
-
-            var roles = principal.FindAll(SecurityClaimTypes.Roles).Select(c => c.Value)
-                .Concat(principal.FindAll(SecurityClaimTypes.Role).Select(c => c.Value));
-
-            return roles.Any(r => string.Equals(r, "platform_admin", StringComparison.OrdinalIgnoreCase));
-        }
-
         static bool HasAnyNonPlatformRole(ClaimsPrincipal principal)
         {
             var roles = principal.FindAll(SecurityClaimTypes.Roles).Select(c => c.Value)
@@ -145,7 +174,10 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
 
             foreach (var role in roles)
             {
-                if (!string.Equals(role, "platform_admin", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(role, PlatformRoles.LegacyPlatformAdmin, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(role, PlatformRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(role, PlatformRoles.OpsAdmin, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(role, PlatformRoles.ReadonlyAdmin, StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -233,6 +265,42 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 return;
             }
 
+            var tokenType = principal.FindFirst(SecurityClaimTypes.TokenType)?.Value;
+            var tokenPlane = principal.FindFirst(SecurityClaimTypes.TokenPlane)?.Value;
+            if (string.IsNullOrWhiteSpace(tokenPlane))
+            {
+                context.Fail("invalid_token_plane");
+                return;
+            }
+
+            var isPlatformToken = string.Equals(tokenPlane, "platform", StringComparison.OrdinalIgnoreCase);
+            var isTenantToken = string.Equals(tokenPlane, "tenant", StringComparison.OrdinalIgnoreCase);
+            if (!isPlatformToken && !isTenantToken)
+            {
+                context.Fail("invalid_token_plane");
+                return;
+            }
+
+            // Token-type separation:
+            // - Tenant APIs: token_type=access
+            // - Platform APIs: token_type=platform_access
+            if (isTenantToken)
+            {
+                if (!string.Equals(tokenType, "access", StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Fail("invalid_token_type");
+                    return;
+                }
+            }
+            else
+            {
+                if (!string.Equals(tokenType, "platform_access", StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Fail("invalid_token_type");
+                    return;
+                }
+            }
+
             // Environment isolation (runtime): require env claim match when safety enabled or outside Development.
             var safety = _safetyOptions.CurrentValue;
             var enforceEnv = safety.Enabled || !_hostEnvironment.IsDevelopment();
@@ -257,8 +325,6 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             var subjectRaw = principal.FindFirst("sub")?.Value;
             var sessionRaw = principal.FindFirst(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.SessionId)?.Value;
 
-            var isPlatformAdmin = IsPlatformAdmin(principal);
-
             if (!Guid.TryParse(subjectRaw, out var ourSubject))
             {
                 context.Fail("invalid_token");
@@ -269,7 +335,7 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
 
             // Enforce tier separation: platform token MUST NOT carry tenant_id or non-platform roles.
             // Tenant token MUST carry tenant_id and MUST NOT carry platform role/scope.
-            if (isPlatformAdmin)
+            if (isPlatformToken)
             {
                 if (hasTenant)
                 {
@@ -283,6 +349,84 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                     return;
                 }
 
+                // Minimal platform revocation: global platform token version.
+                // When the stored version is bumped, all older platform tokens must fail immediately.
+                var tvRaw = principal.FindFirst(SecurityClaimTypes.PlatformTokenVersion)?.Value;
+                if (!long.TryParse(tvRaw, out var tokenTv) || tokenTv <= 0)
+                {
+                    context.Fail("platform_token_version_missing");
+                    return;
+                }
+
+                var platformTvStore = context.HttpContext.RequestServices.GetService<IPlatformTokenVersionStore>();
+                if (platformTvStore is not null)
+                {
+                    var currentTv = await platformTvStore.GetCurrentAsync(context.HttpContext.RequestAborted);
+                    if (tokenTv != currentTv)
+                    {
+                        context.Fail("platform_token_revoked");
+                        return;
+                    }
+                }
+
+                // V20 platform admin governance:
+                // - If a platform role claim exists, it must match an active platform admin record.
+                // - Token must carry a platform admin token version that matches the current record.
+                // - Role changes / disable flip the version, invalidating existing tokens immediately.
+                // Backwards compatibility: legacy permission-only platform tokens (no platform roles claim)
+                // are allowed by this check.
+                var roles = principal.FindAll(SecurityClaimTypes.Roles).Select(c => c.Value)
+                    .Concat(principal.FindAll(SecurityClaimTypes.Role).Select(c => c.Value))
+                    .Where(r => !string.IsNullOrWhiteSpace(r))
+                    .ToArray();
+
+                var platformRole = roles.FirstOrDefault(r =>
+                    string.Equals(r, PlatformRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(r, PlatformRoles.OpsAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(r, PlatformRoles.ReadonlyAdmin, StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrWhiteSpace(platformRole))
+                {
+                    var adminStore = context.HttpContext.RequestServices.GetService<IPlatformAdminStore>();
+                    if (adminStore is null)
+                    {
+                        context.Fail("platform_admin_store_missing");
+                        return;
+                    }
+
+                    var record = await adminStore.FindAsync(ourSubject, context.HttpContext.RequestAborted);
+                    if (record is null)
+                    {
+                        context.Fail("platform_admin_not_found");
+                        return;
+                    }
+
+                    if (record.Status != PlatformAdminStatus.Active)
+                    {
+                        context.Fail("platform_admin_disabled");
+                        return;
+                    }
+
+                    if (!string.Equals(record.Role, platformRole, StringComparison.OrdinalIgnoreCase))
+                    {
+                        context.Fail("platform_admin_role_mismatch");
+                        return;
+                    }
+
+                    var adminTvRaw = principal.FindFirst(TokenConstants.PlatformAdminTokenVersionClaim)?.Value;
+                    if (!long.TryParse(adminTvRaw, out var adminTv) || adminTv <= 0)
+                    {
+                        context.Fail("platform_admin_token_version_missing");
+                        return;
+                    }
+
+                    if (adminTv != record.TokenVersion)
+                    {
+                        context.Fail("platform_admin_token_revoked");
+                        return;
+                    }
+                }
+
                 // Platform admin: no tenant/subject activity checks here (platform surface is cross-tenant).
                 return;
             }
@@ -294,8 +438,14 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             }
 
             // Prevent a tenant token from claiming platform authority.
-            if (principal.FindAll(SecurityClaimTypes.Roles).Any(c => string.Equals(c.Value, "platform_admin", StringComparison.OrdinalIgnoreCase))
-                || principal.FindAll(SecurityClaimTypes.Role).Any(c => string.Equals(c.Value, "platform_admin", StringComparison.OrdinalIgnoreCase))
+            if (principal.FindAll(SecurityClaimTypes.Roles).Any(c => string.Equals(c.Value, PlatformRoles.LegacyPlatformAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.OpsAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.ReadonlyAdmin, StringComparison.OrdinalIgnoreCase))
+                || principal.FindAll(SecurityClaimTypes.Role).Any(c => string.Equals(c.Value, PlatformRoles.LegacyPlatformAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.SuperAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.OpsAdmin, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Value, PlatformRoles.ReadonlyAdmin, StringComparison.OrdinalIgnoreCase))
                 || principal.FindAll(SecurityClaimTypes.Scope).Any(c => string.Equals(c.Value, "security.platform_admin", StringComparison.OrdinalIgnoreCase))
                 || (principal.FindFirst(SecurityClaimTypes.Scopes)?.Value ?? string.Empty)
                     .Split(' ', StringSplitOptions.RemoveEmptyEntries)
@@ -319,6 +469,27 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 }
             }
 
+            var tenantTvRaw = principal.FindFirst(SecurityClaimTypes.TenantTokenVersion)?.Value;
+            var subjectTvRaw = principal.FindFirst(SecurityClaimTypes.SubjectTokenVersion)?.Value;
+            var hasAnyTokenVersionClaim = !string.IsNullOrWhiteSpace(tenantTvRaw) || !string.IsNullOrWhiteSpace(subjectTvRaw);
+
+            var tokenTenantTv = 0;
+            var tokenSubjectTv = 0;
+            if (hasAnyTokenVersionClaim)
+            {
+                if (!int.TryParse(tenantTvRaw, out tokenTenantTv) || tokenTenantTv < 0)
+                {
+                    context.Fail("tenant_token_version_invalid");
+                    return;
+                }
+
+                if (!int.TryParse(subjectTvRaw, out tokenSubjectTv) || tokenSubjectTv < 0)
+                {
+                    context.Fail("subject_token_version_invalid");
+                    return;
+                }
+            }
+
             var tenants = context.HttpContext.RequestServices.GetService<ITenantRepository>();
             var subjects = context.HttpContext.RequestServices.GetService<ISubjectRepository>();
             if (tenants is not null)
@@ -329,6 +500,12 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                     context.Fail("tenant_not_active");
                     return;
                 }
+
+                if (hasAnyTokenVersionClaim && tenant.TokenVersion != tokenTenantTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
+                    return;
+                }
             }
 
             if (subjects is not null)
@@ -337,6 +514,12 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 if (subject is null || subject.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
                 {
                     context.Fail("user_not_active");
+                    return;
+                }
+
+                if (hasAnyTokenVersionClaim && subject.TokenVersion != tokenSubjectTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
                     return;
                 }
             }

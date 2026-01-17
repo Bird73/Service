@@ -124,6 +124,27 @@ public sealed class ProtectedEndpointAuthorizationContractTests
     }
 
     [Fact]
+    public async Task Protected_UsingRefreshTokenAsBearer_Returns_401_InvalidToken()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+            var pair = await IssueTokensAsync(factory, tenantId, ourSubject);
+
+            // Refresh token is opaque (non-JWT). It must never authenticate against Bearer-protected APIs.
+            using var req = CreateGet("/api/v1/test/protected", pair.RefreshToken);
+            var res = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Unauthorized, res.StatusCode);
+
+            var body = await res.Content.ReadFromJsonAsync<ApiResponse<object>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.False(body!.Success);
+            Assert.Equal("invalid_token", body.Error!.Code);
+        });
+    }
+
+    [Fact]
     public async Task ProtectedScope_MissingScope_Returns_403_InsufficientScope()
     {
         await WithTempDbAsync(async (factory, client) =>

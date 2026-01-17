@@ -47,6 +47,14 @@ public sealed class JwtOptions
     /// <summary>Access Token 有效分鐘數</summary>
     public int AccessTokenMinutes { get; init; } = 10;
 
+    /// <summary>
+    /// Platform access token 有效分鐘數（短 TTL）。
+    /// Platform tokens are cross-tenant and must not include tenant_id.
+    /// </summary>
+    // Platform plane access token must be short-lived (governance surface).
+    // Hard cap is also enforced at issuance time.
+    public int PlatformAccessTokenMinutes { get; init; } = 15;
+
     /// <summary>Refresh Token 有效天數</summary>
     public int RefreshTokenDays { get; init; } = 14;
 

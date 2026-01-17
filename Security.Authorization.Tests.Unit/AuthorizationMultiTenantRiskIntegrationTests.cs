@@ -82,6 +82,8 @@ public sealed class AuthorizationMultiTenantRiskIntegrationTests
         {
             new Claim("sub", ourSubject.ToString()),
             new Claim(SecurityClaimTypes.TenantId, tenantId.ToString()),
+            new Claim(SecurityClaimTypes.TokenType, "access"),
+            new Claim(SecurityClaimTypes.TokenPlane, "tenant"),
         };
 
         var creds = new SigningCredentials(
@@ -168,6 +170,70 @@ public sealed class AuthorizationMultiTenantRiskIntegrationTests
                 CreatedAt = now,
                 UpdatedAt = now,
             });
+
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task SeedAdminRoleOnlyAsync(AuthorizationApiFactory factory, Guid tenantId, Guid ourSubject)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SecurityDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+
+        db.Tenants.Add(new TenantEntity { TenantId = tenantId, Name = "A", Status = 0, TokenVersion = 1, CreatedAt = now, UpdatedAt = now });
+        db.Subjects.Add(new SubjectEntity { TenantId = tenantId, OurSubject = ourSubject, DisplayName = "A", Status = 0, TokenVersion = 1, CreatedAt = now, UpdatedAt = now });
+
+        var roleId = Guid.NewGuid();
+        db.Roles.Add(new RoleEntity
+        {
+            TenantId = tenantId,
+            RoleId = roleId,
+            RoleName = "admin",
+            Description = "seeded",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+
+        db.SubjectRoles.Add(new SubjectRoleEntity
+        {
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            RoleId = roleId,
+            AssignedAt = now,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private static async Task SeedPublicPermissionAsync(AuthorizationApiFactory factory, Guid tenantId, Guid ourSubject, string permissionKey)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SecurityDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+
+        db.Tenants.Add(new TenantEntity { TenantId = tenantId, Name = "A", Status = 0, TokenVersion = 1, CreatedAt = now, UpdatedAt = now });
+        db.Subjects.Add(new SubjectEntity { TenantId = tenantId, OurSubject = ourSubject, DisplayName = "A", Status = 0, TokenVersion = 1, CreatedAt = now, UpdatedAt = now });
+
+        var permId = Guid.NewGuid();
+        db.Permissions.Add(new PermissionEntity
+        {
+            PermId = permId,
+            PermKey = permissionKey,
+            ProductKey = null,
+            Description = "public",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+
+        db.SubjectPermissions.Add(new SubjectPermissionEntity
+        {
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            PermId = permId,
+            AssignedAt = now,
+        });
 
         await db.SaveChangesAsync();
     }
@@ -339,6 +405,109 @@ public sealed class AuthorizationMultiTenantRiskIntegrationTests
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             req.Headers.Add("X-Tenant-Id", tenantId.ToString());
             req.Content = JsonContent.Create(new AuthzCheckRequest(ourSubject, "orders", "read", Context: null), options: JsonOptions);
+
+            var res = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+            var body = await res.Content.ReadFromJsonAsync<ApiResponse<AuthzCheckResponse>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.True(body!.Success);
+            Assert.NotNull(body.Data);
+            Assert.True(body.Data!.Allowed);
+        }
+        finally
+        {
+            client?.Dispose();
+            factory?.Dispose();
+            TryDeleteFile(dbPath);
+        }
+    }
+
+    [Fact]
+    public async Task AuthzCheck_UnknownPermission_Denies_WithReason()
+    {
+        var dbPath = CreateTempSqliteDbPath();
+        AuthorizationApiFactory? factory = null;
+        HttpClient? client = null;
+
+        try
+        {
+            factory = CreateEfFactory(dbPath);
+            client = factory.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            {
+                BaseAddress = new Uri("https://localhost"),
+                AllowAutoRedirect = false,
+            });
+
+            await EnsureDbCreatedAsync(factory);
+
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+            await SeedAdminRoleOnlyAsync(factory, tenantId, ourSubject);
+
+            var token = IssueTenantToken(
+                issuer: "https://security.authz.test",
+                audience: "service",
+                symmetricKey: "integration-test-signing-key-12345678901234567890",
+                tenantId: tenantId,
+                ourSubject: ourSubject);
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/authz/check");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Headers.Add("X-Tenant-Id", tenantId.ToString());
+            req.Content = JsonContent.Create(new AuthzCheckRequest(ourSubject, "ghost", "read", Context: null), options: JsonOptions);
+
+            var res = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+
+            var body = await res.Content.ReadFromJsonAsync<ApiResponse<AuthzCheckResponse>>(JsonOptions);
+            Assert.NotNull(body);
+            Assert.True(body!.Success);
+            Assert.NotNull(body.Data);
+            Assert.False(body.Data!.Allowed);
+            Assert.Equal("unknown_permission", body.Data.Reason);
+        }
+        finally
+        {
+            client?.Dispose();
+            factory?.Dispose();
+            TryDeleteFile(dbPath);
+        }
+    }
+
+    [Fact]
+    public async Task AuthzCheck_PublicPermission_Allows_WithoutEntitlement()
+    {
+        var dbPath = CreateTempSqliteDbPath();
+        AuthorizationApiFactory? factory = null;
+        HttpClient? client = null;
+
+        try
+        {
+            factory = CreateEfFactory(dbPath);
+            client = factory.CreateClient(new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            {
+                BaseAddress = new Uri("https://localhost"),
+                AllowAutoRedirect = false,
+            });
+
+            await EnsureDbCreatedAsync(factory);
+
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+            await SeedPublicPermissionAsync(factory, tenantId, ourSubject, permissionKey: "public:ping");
+
+            var token = IssueTenantToken(
+                issuer: "https://security.authz.test",
+                audience: "service",
+                symmetricKey: "integration-test-signing-key-12345678901234567890",
+                tenantId: tenantId,
+                ourSubject: ourSubject);
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/authz/check");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            req.Headers.Add("X-Tenant-Id", tenantId.ToString());
+            req.Content = JsonContent.Create(new AuthzCheckRequest(ourSubject, "public", "ping", Context: null), options: JsonOptions);
 
             var res = await client.SendAsync(req);
             Assert.Equal(HttpStatusCode.OK, res.StatusCode);

@@ -13,7 +13,9 @@ Access Token 必須至少包含：
 - `nbf`：最早可用時間
 - `jti`：JWT ID（可用於 denylist / 即時撤銷）
 - `sub`：本系統 subject（語意上等同 `our_subject`）
-- `tenant_id`：租戶 GUID
+- `token_type`：必須為 `access`（API Bearer pipeline 只接受 access token）
+- `token_plane`：必須為 `tenant` 或 `platform`
+- `tenant_id`：租戶 GUID（僅 `token_plane=tenant` 時必須存在；`token_plane=platform` 時必須不存在）
 - `session_id`：可撤銷 session id（GUID；用於即時撤銷/登出）
 
 對應 code 常數：`Security.Abstractions.Constants.SecurityJwtSpec`、`Security.Abstractions.Constants.SecurityClaimTypes`。
@@ -40,3 +42,13 @@ Access Token 必須至少包含：
 - key rotation：新舊 key 共存期間，舊 token 必須仍可驗證；移除舊 key 後，舊 token 必須不可驗證
 - 若採即時撤銷：驗證端必須檢查 `jti` 是否在 denylist 或版本號是否匹配
 - 若 token 包含 `session_id`：驗證端應檢查 session 是否仍為 active（否則視為 `session_terminated`）
+
+## Refresh Token（封版：Opaque）
+
+本模組的 Refresh Token **不是 JWT**，規格封版為 **opaque random string**。
+
+- Refresh Token 不攜帶 claims，不包含 `token_type` / `token_plane` / `tenant_id` 等欄位
+- Refresh Token 必須只允許用於 `POST /api/v1/auth/token/refresh`（或相容路由 `/auth/refresh`）
+- Refresh Token **不得**被任何 API Bearer pipeline 視為可驗證的 access token（以 refresh token 呼叫受保護 API 必須回傳 `401 invalid_token`）
+- 安全性要求：Refresh Token 必須以 hash（含 pepper）儲存於伺服端；必須做 rotation；偵測 reuse 時必須拒絕並撤銷該 refresh session（或 all-devices 規則依實作）
+

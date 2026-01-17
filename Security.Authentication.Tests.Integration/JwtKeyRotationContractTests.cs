@@ -82,6 +82,8 @@ public sealed class JwtKeyRotationContractTests
             ["aud"] = audience,
             ["sub"] = ourSubject.ToString(),
             [SecurityClaimTypes.TenantId] = tenantId.ToString(),
+            [SecurityClaimTypes.TokenType] = "access",
+            [SecurityClaimTypes.TokenPlane] = "tenant",
             [SecurityClaimTypes.Jti] = jti,
             ["nbf"] = nowUnixSeconds,
             ["iat"] = nowUnixSeconds,

@@ -30,6 +30,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IOptionsMonitor<RefreshTokenHashingOptions> _refreshHashing;
     private readonly IJwtKeyProvider _keys;
+    private readonly IAuthorizationDataStore? _authz;
     private readonly ISessionStore _sessions;
     private readonly TimeProvider _time;
     private readonly ConcurrentDictionary<string, RefreshRecord> _refresh = new(StringComparer.Ordinal);
@@ -43,7 +44,8 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         IOptionsMonitor<RefreshTokenHashingOptions> refreshHashing,
         IJwtKeyProvider keys,
         ISessionStore sessions,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IAuthorizationDataStore? authz = null)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
@@ -53,6 +55,7 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         _keys = keys;
         _sessions = sessions;
         _time = timeProvider ?? TimeProvider.System;
+        _authz = authz;
     }
 
     public Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
@@ -110,6 +113,12 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         if (exp + skew < now)
         {
             return Task.FromResult(AccessTokenValidationResult.Fail(AuthErrorCodes.TokenExpired));
+        }
+
+        if (!TryGetString(root, SecurityClaimTypes.TokenType, out var tokenType)
+            || !string.Equals(tokenType, "access", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(AccessTokenValidationResult.Fail("invalid_token_type"));
         }
 
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
@@ -227,61 +236,77 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         return Task.FromResult(true);
     }
 
-    public Task<TokenPair> GenerateTokensAsync(
+    public async Task<TokenPair> GenerateTokensAsync(
         Guid tenantId,
         Guid ourSubject,
         IReadOnlyList<string>? roles = null,
         IReadOnlyList<string>? scopes = null,
         CancellationToken cancellationToken = default)
     {
-        var sessionId = _sessions.CreateSessionAsync(tenantId, ourSubject, _time.GetUtcNow(), cancellationToken)
-            .GetAwaiter()
-            .GetResult();
+        var sessionId = await _sessions.CreateSessionAsync(tenantId, ourSubject, _time.GetUtcNow(), cancellationToken);
         var opts = _jwtOptions.CurrentValue;
 
+        var effectiveRoles = roles;
+        var effectiveScopes = scopes;
+        IReadOnlyList<string>? effectivePermissions = null;
+
+        if (_authz is not null)
+        {
+            if (effectiveRoles is null)
+            {
+                effectiveRoles = await _authz.GetRolesAsync(tenantId, ourSubject, cancellationToken);
+            }
+
+            if (effectiveScopes is null)
+            {
+                effectiveScopes = await _authz.GetScopesAsync(tenantId, ourSubject, cancellationToken);
+            }
+
+            effectivePermissions = await _authz.GetPermissionsAsync(tenantId, ourSubject, cancellationToken);
+        }
+
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, roles, scopes);
+        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, effectiveRoles, effectiveScopes, effectivePermissions);
 
         var refreshToken = CreateRefreshToken(tenantId);
         var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
         _refresh[HashRefreshToken(refreshToken)] = new RefreshRecord(tenantId, ourSubject, sessionId, refreshExpires, Revoked: false, ReplacedByTokenHash: null);
 
-        return Task.FromResult(new TokenPair
+        return new TokenPair
         {
             AccessToken = accessToken,
             RefreshToken = refreshToken,
             ExpiresIn = Math.Max(1, opts.AccessTokenMinutes) * 60,
-        });
+        };
     }
 
-    public Task<RefreshResult> RefreshAsync(Guid tenantId, string refreshToken, CancellationToken cancellationToken = default)
+    public async Task<RefreshResult> RefreshAsync(Guid tenantId, string refreshToken, CancellationToken cancellationToken = default)
     {
-        _ = cancellationToken;
         if (string.IsNullOrWhiteSpace(refreshToken))
         {
-            return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
+            return RefreshResult.Fail("invalid_refresh_token");
         }
 
         if (TryExtractTenantId(refreshToken, out var tokenTenantId) && tokenTenantId != tenantId)
         {
-            return Task.FromResult(RefreshResult.Fail("invalid_tenant"));
+            return RefreshResult.Fail("invalid_tenant");
         }
 
         var tokenHash = HashRefreshToken(refreshToken);
         if (!_refresh.TryGetValue(tokenHash, out var rec))
         {
-            return Task.FromResult(RefreshResult.Fail("invalid_refresh_token"));
+            return RefreshResult.Fail("invalid_refresh_token");
         }
 
         // Tenant hardening: refresh token must be used under the same tenant context.
         if (rec.TenantId != tenantId)
         {
-            return Task.FromResult(RefreshResult.Fail("invalid_tenant"));
+            return RefreshResult.Fail("invalid_tenant");
         }
 
         if (rec.ExpiresAt <= _time.GetUtcNow())
         {
-            return Task.FromResult(RefreshResult.Fail("expired_refresh_token"));
+            return RefreshResult.Fail("expired_refresh_token");
         }
 
         if (rec.Revoked)
@@ -297,19 +322,17 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
                     }
                 }
 
-                _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "refresh_reuse", cancellationToken)
-                    .GetAwaiter()
-                    .GetResult();
+                _ = await _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "refresh_reuse", cancellationToken);
 
-                return Task.FromResult(RefreshResult.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected));
+                return RefreshResult.Fail(Birdsoft.Security.Abstractions.Constants.AuthErrorCodes.RefreshTokenReuseDetected);
             }
 
-            return Task.FromResult(RefreshResult.Fail("revoked_refresh_token"));
+            return RefreshResult.Fail("revoked_refresh_token");
         }
 
-        if (!_sessions.IsSessionActiveAsync(rec.TenantId, rec.SessionId, cancellationToken).GetAwaiter().GetResult())
+        if (!await _sessions.IsSessionActiveAsync(rec.TenantId, rec.SessionId, cancellationToken))
         {
-            return Task.FromResult(RefreshResult.Fail("session_terminated"));
+            return RefreshResult.Fail("session_terminated");
         }
 
         // rotation
@@ -317,12 +340,8 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         var newHash = HashRefreshToken(newRefresh);
 
         // Spec: each refresh rotation creates a new session.
-        var newSessionId = _sessions.CreateSessionAsync(rec.TenantId, rec.OurSubject, _time.GetUtcNow(), cancellationToken)
-            .GetAwaiter()
-            .GetResult();
-        _ = _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "rotated", cancellationToken)
-            .GetAwaiter()
-            .GetResult();
+        var newSessionId = await _sessions.CreateSessionAsync(rec.TenantId, rec.OurSubject, _time.GetUtcNow(), cancellationToken);
+        _ = await _sessions.TerminateSessionAsync(rec.TenantId, rec.SessionId, _time.GetUtcNow(), reason: "rotated", cancellationToken);
 
         var replaced = rec with { Revoked = true, ReplacedByTokenHash = newHash };
         _refresh[tokenHash] = replaced;
@@ -331,15 +350,26 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         _refresh[newHash] = newRec;
 
         var opts = _jwtOptions.CurrentValue;
-        var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, rec.TenantId, rec.OurSubject, jti, newSessionId, roles: null, scopes: null);
 
-        return Task.FromResult(RefreshResult.Success(new TokenPair
+        IReadOnlyList<string>? roles = null;
+        IReadOnlyList<string>? scopes = null;
+        IReadOnlyList<string>? permissions = null;
+        if (_authz is not null)
+        {
+            roles = await _authz.GetRolesAsync(rec.TenantId, rec.OurSubject, cancellationToken);
+            scopes = await _authz.GetScopesAsync(rec.TenantId, rec.OurSubject, cancellationToken);
+            permissions = await _authz.GetPermissionsAsync(rec.TenantId, rec.OurSubject, cancellationToken);
+        }
+
+        var jti = Guid.NewGuid().ToString("N");
+        var accessToken = CreateAccessToken(opts, rec.TenantId, rec.OurSubject, jti, newSessionId, roles, scopes, permissions);
+
+        return RefreshResult.Success(new TokenPair
         {
             AccessToken = accessToken,
             RefreshToken = newRefresh,
             ExpiresIn = Math.Max(1, opts.AccessTokenMinutes) * 60,
-        }));
+        });
     }
 
     public Task<RevokeResult> RevokeAsync(Guid tenantId, Guid ourSubject, string refreshToken, CancellationToken cancellationToken = default)
@@ -441,7 +471,8 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
         string jti,
         Guid sessionId,
         IReadOnlyList<string>? roles,
-        IReadOnlyList<string>? scopes)
+        IReadOnlyList<string>? scopes,
+        IReadOnlyList<string>? permissions)
     {
         var now = _time.GetUtcNow();
         var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
@@ -473,6 +504,8 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
             ["sub"] = ourSubject.ToString(),
             [SecurityClaimTypes.TenantId] = tenantId.ToString(),
             [SecurityClaimTypes.OurSubject] = ourSubject.ToString(),
+            [SecurityClaimTypes.TokenType] = "access",
+            [SecurityClaimTypes.TokenPlane] = "tenant",
         };
 
         if (!string.IsNullOrWhiteSpace(env.EnvironmentId))
@@ -492,6 +525,11 @@ public sealed class InMemoryTokenService : ITokenService, IAccessTokenDenylistSt
 
             // Compat: OAuth 'scope' (space-delimited)
             payload[SecurityClaimTypes.Scope] = string.Join(' ', scopes);
+        }
+
+        if (permissions is { Count: > 0 })
+        {
+            payload[SecurityClaimTypes.Permissions] = permissions;
         }
 
         var headerJson = JsonSerializer.Serialize(header, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });

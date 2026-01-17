@@ -45,6 +45,8 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
         public bool SafetyEnabled { get; init; } = false;
 
         public IReadOnlyDictionary<string, string?>? ExtraConfiguration { get; init; }
+
+        public Action<IServiceCollection>? ConfigureTestServices { get; init; }
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -55,6 +57,12 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
         {
             var dict = new Dictionary<string, string?>
             {
+                ["Logging:LogLevel:Default"] = "Warning",
+                ["Logging:LogLevel:Microsoft"] = "Warning",
+                ["Logging:LogLevel:System"] = "Warning",
+                ["Logging:LogLevel:Microsoft.EntityFrameworkCore.Database.Command"] = "Warning",
+                ["Logging:LogLevel:Microsoft.AspNetCore.HttpsPolicy"] = "Error",
+
                 ["ConnectionStrings:SecurityDb"] = _overrides.SecurityDbConnectionString,
 
                 [$"{JwtOptions.SectionName}:Issuer"] = _overrides.JwtIssuer,
@@ -92,6 +100,8 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
             services.RemoveAll(typeof(IAppLogger<>));
             services.AddTransient(typeof(IAppLogger<>), typeof(TestAppLogger<>));
 
+            _overrides.ConfigureTestServices?.Invoke(services);
+
             if (string.IsNullOrWhiteSpace(_overrides.SecurityDbConnectionString))
             {
                 return;
@@ -107,6 +117,7 @@ public sealed class AuthorizationApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<Birdsoft.Security.Abstractions.Stores.IAuthEventStore>();
 
             services.RemoveAll<Birdsoft.Security.Abstractions.Stores.IAuthorizationDataStore>();
+            services.RemoveAll<Birdsoft.Security.Abstractions.Stores.IAuthorizationAdminStore>();
             services.RemoveAll<Birdsoft.Security.Abstractions.Stores.IPermissionCatalogStore>();
             services.RemoveAll<Birdsoft.Security.Abstractions.Stores.ITenantEntitlementStore>();
 

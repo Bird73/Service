@@ -10,4 +10,8 @@ public static class TokenConstants
 
     public const string TokenFormatVersionClaim = "token_fv";
     public const string EnvironmentIdClaim = "env";
+    
+    // V20: platform admin account governance
+    // Monotonic per-platform-admin token version. Role changes / disable bump this value.
+    public const string PlatformAdminTokenVersionClaim = "platform_admin_tv";
 }

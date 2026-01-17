@@ -24,10 +24,12 @@ public sealed class EfTenantEntitlementStore : ITenantEntitlementStore
         // Note: SQLite has limitations translating DateTimeOffset comparisons; apply the time-window check in-memory.
         var row = await (
             from tp in _db.TenantProducts.AsNoTracking()
+            join t in _db.Tenants.AsNoTracking() on tp.TenantId equals t.TenantId
             join p in _db.Products.AsNoTracking() on tp.ProductKey equals p.ProductKey
             where tp.TenantId == tenantId
                 && tp.ProductKey == productKey
                 && tp.Status == (int)TenantProductStatus.Enabled
+                && t.Status == (int)TenantStatus.Active
                 && p.Status == (int)ProductStatus.Enabled
             select new
             {

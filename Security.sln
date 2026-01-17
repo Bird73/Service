@@ -21,6 +21,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Authentication.Tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Bootstrap.Tests.Integration", "Security.Bootstrap.Tests.Integration\Security.Bootstrap.Tests.Integration.csproj", "{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Security.Authorization.Tests.Integration", "Security.Authorization.Tests.Integration\Security.Authorization.Tests.Integration.csproj", "{AF80A497-4721-400B-839A-4F1350BF54A8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -139,6 +141,18 @@ Global
 		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x64.Build.0 = Release|Any CPU
 		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x86.ActiveCfg = Release|Any CPU
 		{70F3744C-BADE-4FAD-BB16-C4DD32020FF2}.Release|x86.Build.0 = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|x64.Build.0 = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Debug|x86.Build.0 = Debug|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|x64.ActiveCfg = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|x64.Build.0 = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|x86.ActiveCfg = Release|Any CPU
+		{AF80A497-4721-400B-839A-4F1350BF54A8}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

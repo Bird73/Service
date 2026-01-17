@@ -79,10 +79,17 @@ public sealed class EfAuthorizationStore : IAuthorizationDataStore, IAuthorizati
         var roles = await GetRolesAsync(tenantId, ourSubject, cancellationToken);
         var scopes = await GetScopesAsync(tenantId, ourSubject, cancellationToken);
 
-        // NOTE: This returns effective permissions (role-derived + direct).
-        var perms = await GetPermissionsAsync(tenantId, ourSubject, cancellationToken);
+        // Admin surface: return direct (assigned) permissions only.
+        // Effective permissions (role-derived + direct) are available via GetPermissionsAsync.
+        var directPerms = await (
+                from sp in _db.SubjectPermissions.AsNoTracking()
+                join p in _db.Permissions.AsNoTracking() on sp.PermId equals p.PermId
+                where sp.TenantId == tenantId && sp.OurSubject == ourSubject
+                select p.PermKey)
+            .Distinct()
+            .ToListAsync(cancellationToken);
 
-        return (new AuthorizationGrants(roles, scopes, perms), tenantVer, subject.TokenVersion);
+        return (new AuthorizationGrants(roles, scopes, directPerms), tenantVer, subject.TokenVersion);
     }
 
     public async ValueTask<AuthorizationChangeReceipt> SetSubjectGrantsAsync(
@@ -156,14 +163,20 @@ public sealed class EfAuthorizationStore : IAuthorizationDataStore, IAuthorizati
             }
         }
 
-        // Scopes: stored as literal keys.
-        foreach (var scope in grants.Scopes.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.Ordinal))
+        // Scopes: stored as literal keys (trim + de-dupe).
+        var normalizedScopes = grants.Scopes
+            .Select(s => s?.Trim())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .Distinct(StringComparer.Ordinal);
+
+        foreach (var scope in normalizedScopes)
         {
             _db.SubjectScopes.Add(new SubjectScopeEntity
             {
                 TenantId = tenantId,
                 OurSubject = ourSubject,
-                ScopeKey = scope.Trim(),
+                ScopeKey = scope,
                 AssignedAt = now,
             });
         }

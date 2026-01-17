@@ -298,5 +298,6 @@ public sealed class PasswordLoginContractTests
         // Required custom fields
         Assert.Contains(jwt.Claims, c => c.Type == SecurityClaimTypes.TenantId && c.Value == tenantId.ToString());
         Assert.Contains(jwt.Claims, c => c.Type == SecurityClaimTypes.SessionId && Guid.TryParse(c.Value, out _));
+        Assert.Contains(jwt.Claims, c => c.Type == SecurityClaimTypes.TokenType && string.Equals(c.Value, "access", StringComparison.OrdinalIgnoreCase));
     }
 }

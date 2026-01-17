@@ -1,8 +1,9 @@
 namespace Birdsoft.Security.Authorization.Tests.Unit;
 
 using Birdsoft.Security.Abstractions.Stores;
-using Birdsoft.Security.Abstractions.Stores;
+using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Authorization.Evaluation;
+using Microsoft.Extensions.Options;
 
 public sealed class AuthorizationSkeletonTests
 {
@@ -41,13 +42,18 @@ public sealed class AuthorizationSkeletonTests
             roles: []);
 
         var inner = new SimpleRbacAuthorizationEvaluator(store);
-        var catalog = new FakePermissionCatalogStore(new Dictionary<string, string>(StringComparer.Ordinal)
+        var catalog = new FakePermissionCatalogStore(new Dictionary<string, string?>(StringComparer.Ordinal)
         {
             ["orders:read"] = "orders",
         });
         var entitlements = new FakeTenantEntitlementStore(enabled: false);
 
-        IAuthorizationEvaluator evaluator = new EntitlementAuthorizationEvaluator(inner, catalog, entitlements);
+        var authzOptions = Options.Create(new SecurityAuthorizationOptions
+        {
+            PublicPermissionPrefixes = ["public:"],
+        });
+
+        IAuthorizationEvaluator evaluator = new EntitlementAuthorizationEvaluator(inner, catalog, entitlements, new OptionsMonitorShim<SecurityAuthorizationOptions>(authzOptions.Value));
 
         var decision = await evaluator.EvaluateAsync(new AuthorizationRequest(
             TenantId: tenantId,
@@ -71,13 +77,18 @@ public sealed class AuthorizationSkeletonTests
             roles: []);
 
         var inner = new SimpleRbacAuthorizationEvaluator(store);
-        var catalog = new FakePermissionCatalogStore(new Dictionary<string, string>(StringComparer.Ordinal)
+        var catalog = new FakePermissionCatalogStore(new Dictionary<string, string?>(StringComparer.Ordinal)
         {
             ["orders:read"] = "orders",
         });
         var entitlements = new FakeTenantEntitlementStore(enabled: true);
 
-        IAuthorizationEvaluator evaluator = new EntitlementAuthorizationEvaluator(inner, catalog, entitlements);
+        var authzOptions = Options.Create(new SecurityAuthorizationOptions
+        {
+            PublicPermissionPrefixes = ["public:"],
+        });
+
+        IAuthorizationEvaluator evaluator = new EntitlementAuthorizationEvaluator(inner, catalog, entitlements, new OptionsMonitorShim<SecurityAuthorizationOptions>(authzOptions.Value));
 
         var decision = await evaluator.EvaluateAsync(new AuthorizationRequest(
             TenantId: tenantId,
@@ -87,6 +98,43 @@ public sealed class AuthorizationSkeletonTests
 
         Assert.True(decision.Allowed);
         Assert.Equal("permission_match", decision.Reason);
+    }
+
+    [Fact]
+    public async Task EntitlementAuthorizationEvaluator_Denies_When_RequiredPrefix_Is_Public_In_Catalog()
+    {
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+
+        var store = new FakeAuthorizationDataStore(
+            permissions: ["orders:read"],
+            scopes: [],
+            roles: []);
+
+        var inner = new SimpleRbacAuthorizationEvaluator(store);
+        var catalog = new FakePermissionCatalogStore(new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            // Misconfigured: orders:* is supposed to be product-bound, but catalog says it's public.
+            ["orders:read"] = null,
+        });
+        var entitlements = new FakeTenantEntitlementStore(enabled: true);
+
+        var authzOptions = Options.Create(new SecurityAuthorizationOptions
+        {
+            PublicPermissionPrefixes = ["public:"],
+            RequiredProductPrefixes = ["orders:"],
+        });
+
+        IAuthorizationEvaluator evaluator = new EntitlementAuthorizationEvaluator(inner, catalog, entitlements, new OptionsMonitorShim<SecurityAuthorizationOptions>(authzOptions.Value));
+
+        var decision = await evaluator.EvaluateAsync(new AuthorizationRequest(
+            TenantId: tenantId,
+            OurSubject: ourSubject,
+            Resource: "orders",
+            Action: "read"));
+
+        Assert.False(decision.Allowed);
+        Assert.Equal("permission_catalog_violation", decision.Reason);
     }
 
     private sealed class FakeAuthorizationDataStore : IAuthorizationDataStore
@@ -114,20 +162,28 @@ public sealed class AuthorizationSkeletonTests
 
     private sealed class FakePermissionCatalogStore : IPermissionCatalogStore
     {
-        private readonly IReadOnlyDictionary<string, string> _productKeysByPermission;
+        private readonly IReadOnlyDictionary<string, string?> _productKeysByPermission;
 
-        public FakePermissionCatalogStore(IReadOnlyDictionary<string, string> productKeysByPermission)
+        public FakePermissionCatalogStore(IReadOnlyDictionary<string, string?> productKeysByPermission)
         {
             _productKeysByPermission = productKeysByPermission;
         }
 
-        public ValueTask<string?> GetProductKeyForPermissionAsync(string permissionKey, CancellationToken cancellationToken = default)
+        public ValueTask<PermissionCatalogEntry?> TryGetPermissionAsync(string permissionKey, CancellationToken cancellationToken = default)
         {
-            if (_productKeysByPermission.TryGetValue(permissionKey, out var productKey))
+            _ = cancellationToken;
+            if (string.IsNullOrWhiteSpace(permissionKey))
             {
-                return ValueTask.FromResult<string?>(productKey);
+                return ValueTask.FromResult<PermissionCatalogEntry?>(null);
             }
-            return ValueTask.FromResult<string?>(null);
+
+            var key = permissionKey.Trim();
+            if (_productKeysByPermission.TryGetValue(key, out var productKey))
+            {
+                return ValueTask.FromResult<PermissionCatalogEntry?>(new PermissionCatalogEntry(key, productKey));
+            }
+
+            return ValueTask.FromResult<PermissionCatalogEntry?>(null);
         }
     }
 
@@ -142,5 +198,20 @@ public sealed class AuthorizationSkeletonTests
 
         public ValueTask<bool> IsProductEnabledAsync(Guid tenantId, string productKey, DateTimeOffset now, CancellationToken cancellationToken = default)
             => ValueTask.FromResult(_enabled);
+    }
+
+    private sealed class OptionsMonitorShim<T> : IOptionsMonitor<T>
+        where T : class
+    {
+        public OptionsMonitorShim(T currentValue)
+        {
+            CurrentValue = currentValue;
+        }
+
+        public T CurrentValue { get; }
+
+        public T Get(string? name) => CurrentValue;
+
+        public IDisposable? OnChange(Action<T, string?> listener) => null;
     }
 }

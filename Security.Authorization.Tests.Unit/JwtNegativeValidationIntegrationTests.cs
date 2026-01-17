@@ -78,6 +78,17 @@ public sealed class JwtNegativeValidationIntegrationTests
 
     private static string IssueSignedToken(IEnumerable<Claim> claims)
     {
+        var claimList = claims.ToList();
+        if (!claimList.Any(c => string.Equals(c.Type, Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenType, StringComparison.Ordinal)))
+        {
+            claimList.Add(new Claim(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenType, "access"));
+        }
+
+        if (!claimList.Any(c => string.Equals(c.Type, Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenPlane, StringComparison.Ordinal)))
+        {
+            claimList.Add(new Claim(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenPlane, "tenant"));
+        }
+
         var creds = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes("integration-test-signing-key-12345678901234567890")),
             SecurityAlgorithms.HmacSha256);
@@ -85,7 +96,7 @@ public sealed class JwtNegativeValidationIntegrationTests
         var token = new JwtSecurityToken(
             issuer: "https://security.authz.test",
             audience: "service",
-            claims: claims,
+            claims: claimList,
             notBefore: DateTime.UtcNow.AddMinutes(-1),
             expires: DateTime.UtcNow.AddMinutes(10),
             signingCredentials: creds);

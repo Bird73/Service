@@ -73,6 +73,8 @@ public sealed class TenantAdminRbacNegativeIntegrationTests
         {
             new Claim("sub", ourSubject.ToString()),
             new Claim(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TenantId, tenantId.ToString()),
+            new Claim(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenType, "access"),
+            new Claim(Birdsoft.Security.Abstractions.Constants.SecurityClaimTypes.TokenPlane, "tenant"),
             // Intentionally NO security.admin scope/role/perms.
         };
 

@@ -70,6 +70,12 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
         {
             var dict = new Dictionary<string, string?>
             {
+                ["Logging:LogLevel:Default"] = "Warning",
+                ["Logging:LogLevel:Microsoft"] = "Warning",
+                ["Logging:LogLevel:System"] = "Warning",
+                ["Logging:LogLevel:Microsoft.EntityFrameworkCore.Database.Command"] = "Warning",
+                ["Logging:LogLevel:Microsoft.AspNetCore.HttpsPolicy"] = "Error",
+
                 ["ConnectionStrings:SecurityDb"] = _overrides.SecurityDbConnectionString,
 
                 ["TestEndpoints:Enabled"] = _overrides.EnableTestEndpoints.ToString(),
@@ -162,7 +168,13 @@ public sealed class AuthenticationApiFactory : WebApplicationFactory<Program>
             if (_overrides.Authz is not null)
             {
                 services.RemoveAll<IAuthorizationDataStore>();
-                services.AddSingleton(_overrides.Authz);
+                services.RemoveAll<IAuthorizationAdminStore>();
+
+                services.AddSingleton<IAuthorizationDataStore>(_overrides.Authz);
+                if (_overrides.Authz is IAuthorizationAdminStore admin)
+                {
+                    services.AddSingleton<IAuthorizationAdminStore>(admin);
+                }
             }
 
             if (_overrides.Password is not null)

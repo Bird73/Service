@@ -33,6 +33,16 @@ public sealed class SecurityDbContext : DbContext
     public DbSet<ProductEntity> Products => Set<ProductEntity>();
     public DbSet<TenantProductEntity> TenantProducts => Set<TenantProductEntity>();
 
+    // Platform token governance (single global version row)
+    public DbSet<PlatformTokenVersionEntity> PlatformTokenVersions => Set<PlatformTokenVersionEntity>();
+
+    // Platform admin governance (role assignment + enable/disable)
+    public DbSet<PlatformAdminEntity> PlatformAdmins => Set<PlatformAdminEntity>();
+
+    // Commercial governance: signing key ring + bootstrap keys
+    public DbSet<JwtSigningKeyEntity> JwtSigningKeys => Set<JwtSigningKeyEntity>();
+    public DbSet<BootstrapKeyEntity> BootstrapKeys => Set<BootstrapKeyEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<TenantEntity>(b =>
@@ -146,6 +156,10 @@ public sealed class SecurityDbContext : DbContext
             // Spec: security_audit_logs (append-only)
             b.ToTable("security_audit_logs");
             b.HasKey(x => x.Id);
+            // EFCore.Sqlite can't ORDER BY DateTimeOffset directly; store as UTC DateTime.
+            b.Property(x => x.OccurredAt).HasConversion(
+                v => v.UtcDateTime,
+                v => new DateTimeOffset(DateTime.SpecifyKind(v, DateTimeKind.Utc)));
             b.Property(x => x.Outcome).HasMaxLength(64);
             b.Property(x => x.Code).HasMaxLength(128);
             b.Property(x => x.Detail).HasMaxLength(2048);
@@ -217,6 +231,55 @@ public sealed class SecurityDbContext : DbContext
             b.HasIndex(x => new { x.TenantId, x.ProductKey, x.Status });
             b.HasIndex(x => new { x.ProductKey, x.Status });
             b.HasIndex(x => new { x.TenantId, x.EndAt });
+        });
+
+        modelBuilder.Entity<PlatformTokenVersionEntity>(b =>
+        {
+            b.ToTable("platform_token_versions");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id).HasMaxLength(32);
+            b.HasIndex(x => x.UpdatedAt);
+        });
+
+        modelBuilder.Entity<PlatformAdminEntity>(b =>
+        {
+            b.ToTable("platform_admins");
+            b.HasKey(x => x.OurSubject);
+            b.Property(x => x.Role).HasMaxLength(64);
+            b.Property(x => x.Status);
+            b.HasIndex(x => x.Status);
+            b.HasIndex(x => x.UpdatedAt);
+        });
+
+        modelBuilder.Entity<JwtSigningKeyEntity>(b =>
+        {
+            b.ToTable("jwt_signing_keys");
+            b.HasKey(x => x.Kid);
+            b.Property(x => x.Kid).HasMaxLength(64);
+            b.Property(x => x.Algorithm).HasMaxLength(16);
+            b.Property(x => x.Status);
+            b.Property(x => x.PrivateKeyPem).HasMaxLength(8192);
+            b.Property(x => x.PublicKeyPem).HasMaxLength(4096);
+            b.Property(x => x.SymmetricKey).HasMaxLength(2048);
+            b.Property(x => x.Reason).HasMaxLength(256);
+            b.HasIndex(x => x.Status);
+            b.HasIndex(x => x.UpdatedAt);
+        });
+
+        modelBuilder.Entity<BootstrapKeyEntity>(b =>
+        {
+            b.ToTable("bootstrap_keys");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Label).HasMaxLength(128);
+            b.Property(x => x.KeyHash).HasMaxLength(128);
+            b.Property(x => x.KeyLookup).HasMaxLength(32);
+            b.Property(x => x.Status);
+            b.Property(x => x.RevocationReason).HasMaxLength(256);
+
+            b.HasIndex(x => x.Status);
+            b.HasIndex(x => new { x.Status, x.ExpiresAt });
+            b.HasIndex(x => x.KeyLookup);
+            b.HasIndex(x => x.UpdatedAt);
         });
 
         modelBuilder.Entity<RolePermissionEntity>(b =>

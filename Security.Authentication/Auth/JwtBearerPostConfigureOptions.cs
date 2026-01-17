@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 
 public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOptions<JwtBearerOptions>
 {
@@ -23,19 +24,22 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
     private readonly IOptionsMonitor<SecuritySafetyOptions> _safetyOptions;
     private readonly IHostEnvironment _hostEnvironment;
     private readonly IJwtKeyProvider _keys;
+    private readonly IServiceScopeFactory _scopeFactory;
 
     public BirdsoftJwtBearerPostConfigureOptions(
         IOptionsMonitor<JwtOptions> jwtOptions,
         IOptionsMonitor<SecurityEnvironmentOptions> envOptions,
         IOptionsMonitor<SecuritySafetyOptions> safetyOptions,
         IHostEnvironment hostEnvironment,
-        IJwtKeyProvider keys)
+        IJwtKeyProvider keys,
+        IServiceScopeFactory scopeFactory)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
         _safetyOptions = safetyOptions;
         _hostEnvironment = hostEnvironment;
         _keys = keys;
+        _scopeFactory = scopeFactory;
     }
 
     public void PostConfigure(string? name, JwtBearerOptions options)
@@ -99,6 +103,48 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
             }
 
             // Back-compat: include legacy provider key
+            if (keys.Count == 0)
+            {
+                // Commercial governance: DB-backed signing keys (active + inactive) for verification.
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var store = scope.ServiceProvider.GetService<IJwtSigningKeyStore>();
+                    if (store is not null && store.HasAnyAsync().GetAwaiter().GetResult())
+                    {
+                        var mats = store.GetVerificationKeysAsync().GetAwaiter().GetResult();
+                        foreach (var m in mats)
+                        {
+                            if (!string.Equals(m.Kid, kid, StringComparison.Ordinal))
+                            {
+                                continue;
+                            }
+
+                            var mAlg = string.IsNullOrWhiteSpace(m.Algorithm) ? "RS256" : m.Algorithm.Trim();
+                            if (!string.IsNullOrWhiteSpace(alg) && !string.Equals(mAlg, alg, StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            if (mAlg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var rsa = TryLoadRsa(m.PublicKeyPem);
+                                if (rsa is not null)
+                                {
+                                    keys.Add(new RsaSecurityKey(rsa) { KeyId = m.Kid });
+                                }
+
+                                continue;
+                            }
+
+                            if (mAlg.StartsWith("HS", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.SymmetricKey))
+                            {
+                                keys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(m.SymmetricKey)) { KeyId = m.Kid });
+                            }
+                        }
+                    }
+                }
+            }
+
             if (keys.Count == 0)
             {
                 if (!string.Equals(kid, _keys.Kid, StringComparison.Ordinal))
@@ -232,6 +278,14 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 return;
             }
 
+            // V18 freeze: APIs must only accept access tokens.
+            var tokenType = principal.FindFirst(SecurityClaimTypes.TokenType)?.Value;
+            if (!string.Equals(tokenType, "access", StringComparison.OrdinalIgnoreCase))
+            {
+                context.Fail("invalid_token_type");
+                return;
+            }
+
             // Environment isolation (runtime): require env claim match when safety enabled or outside Development.
             var safety = _safetyOptions.CurrentValue;
             var enforceEnv = safety.Enabled || !_hostEnvironment.IsDevelopment();
@@ -276,6 +330,27 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 }
             }
 
+            var tenantTvRaw = principal.FindFirst(SecurityClaimTypes.TenantTokenVersion)?.Value;
+            var subjectTvRaw = principal.FindFirst(SecurityClaimTypes.SubjectTokenVersion)?.Value;
+            var hasAnyTokenVersionClaim = !string.IsNullOrWhiteSpace(tenantTvRaw) || !string.IsNullOrWhiteSpace(subjectTvRaw);
+
+            var tokenTenantTv = 0;
+            var tokenSubjectTv = 0;
+            if (hasAnyTokenVersionClaim)
+            {
+                if (!int.TryParse(tenantTvRaw, out tokenTenantTv) || tokenTenantTv < 0)
+                {
+                    context.Fail("tenant_token_version_invalid");
+                    return;
+                }
+
+                if (!int.TryParse(subjectTvRaw, out tokenSubjectTv) || tokenSubjectTv < 0)
+                {
+                    context.Fail("subject_token_version_invalid");
+                    return;
+                }
+            }
+
             var tenants = context.HttpContext.RequestServices.GetService<ITenantRepository>();
             var subjects = context.HttpContext.RequestServices.GetService<ISubjectRepository>();
             if (tenants is not null)
@@ -286,6 +361,18 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                     context.Fail("tenant_not_active");
                     return;
                 }
+
+                if (hasAnyTokenVersionClaim && tenant.TokenVersion != tokenTenantTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
+                    return;
+                }
+
+                if (tenant.TokenVersion != tokenTenantTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
+                    return;
+                }
             }
 
             if (subjects is not null)
@@ -294,6 +381,18 @@ public sealed class BirdsoftJwtBearerPostConfigureOptions : IPostConfigureOption
                 if (subject is null || subject.Status != Birdsoft.Security.Abstractions.Models.UserStatus.Active)
                 {
                     context.Fail("user_not_active");
+                    return;
+                }
+
+                if (hasAnyTokenVersionClaim && subject.TokenVersion != tokenSubjectTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
+                    return;
+                }
+
+                if (subject.TokenVersion != tokenSubjectTv)
+                {
+                    context.Fail(AuthErrorCodes.TokenVersionMismatch);
                     return;
                 }
             }

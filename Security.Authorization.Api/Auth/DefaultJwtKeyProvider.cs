@@ -8,6 +8,15 @@ using System.Text;
 
 public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
 {
+    private sealed class NoOpDisposable : IDisposable
+    {
+        public static readonly IDisposable Instance = new NoOpDisposable();
+
+        public void Dispose()
+        {
+        }
+    }
+
     private sealed record KeyState(
         string Algorithm,
         string Kid,
@@ -17,7 +26,7 @@ public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
     private readonly IOptionsMonitor<JwtOptions> _options;
     private readonly object _gate = new();
     private KeyState? _state;
-    private readonly IDisposable _onChange;
+    private readonly IDisposable _onChange = NoOpDisposable.Instance;
 
     public DefaultJwtKeyProvider(IOptionsMonitor<JwtOptions> options)
     {
@@ -28,7 +37,7 @@ public sealed class DefaultJwtKeyProvider : IJwtKeyProvider
             {
                 _state = null;
             }
-        });
+        }) ?? NoOpDisposable.Instance;
     }
 
     public string Algorithm => Ensure().Algorithm;

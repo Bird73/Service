@@ -119,6 +119,8 @@ public sealed class EntitlementLiveGatingIntegrationTests
         {
             new Claim("sub", ourSubject.ToString()),
             new Claim(SecurityClaimTypes.TenantId, tenantId.ToString()),
+            new Claim(SecurityClaimTypes.TokenType, "access"),
+            new Claim(SecurityClaimTypes.TokenPlane, "tenant"),
         };
 
         var creds = new SigningCredentials(

@@ -91,6 +91,53 @@ public sealed class OidcFlowSkeletonTests
         Assert.False(reused.Succeeded);
     }
 
+    [Fact]
+    public async Task Refresh_Preserves_Roles_Scopes_And_Permissions_When_AuthorizationStore_Available()
+    {
+        // Given
+        var tenantId = Guid.NewGuid();
+        var ourSubject = Guid.NewGuid();
+        var services = CreateServices();
+
+        await ((IAuthorizationAdminStore)services.Authz).SetSubjectGrantsAsync(
+            tenantId,
+            ourSubject,
+            new AuthorizationGrants(
+                Roles: ["admin"],
+                Scopes: ["service.read"],
+                Permissions: ["security.manage"]),
+            reason: "unit-test");
+
+        var tokenService = (ITokenService)services.TokenService;
+        var roles = await services.Authz.GetRolesAsync(tenantId, ourSubject);
+        var scopes = await services.Authz.GetScopesAsync(tenantId, ourSubject);
+        var first = await tokenService.GenerateTokensAsync(tenantId, ourSubject, roles, scopes);
+
+        // When
+        var refreshed = await tokenService.RefreshAsync(tenantId, first.RefreshToken);
+
+        // Then
+        Assert.True(refreshed.Succeeded);
+        Assert.NotNull(refreshed.Tokens);
+
+        var payload = DecodeJwtPayload(refreshed.Tokens!.AccessToken);
+
+        Assert.Equal(tenantId.ToString(), payload.GetProperty(SecurityClaimTypes.TenantId).GetString());
+        Assert.Equal(ourSubject.ToString(), payload.GetProperty("sub").GetString());
+
+        var rolesJson = payload.GetProperty(SecurityClaimTypes.Roles);
+        Assert.Equal(JsonValueKind.Array, rolesJson.ValueKind);
+        Assert.Contains("admin", rolesJson.EnumerateArray().Select(e => e.GetString()));
+
+        var scopesJson = payload.GetProperty(SecurityClaimTypes.Scopes);
+        Assert.Equal(JsonValueKind.Array, scopesJson.ValueKind);
+        Assert.Contains("service.read", scopesJson.EnumerateArray().Select(e => e.GetString()));
+
+        var permissionsJson = payload.GetProperty(SecurityClaimTypes.Permissions);
+        Assert.Equal(JsonValueKind.Array, permissionsJson.ValueKind);
+        Assert.Contains("security.manage", permissionsJson.EnumerateArray().Select(e => e.GetString()));
+    }
+
     private static (object TokenService, IAuthStateService AuthState, IOidcProviderService Oidc, IExternalIdentityStore External, IUserProvisioner Provisioner, IAuthorizationDataStore Authz) CreateServices()
     {
         var jwt = new JwtOptions
@@ -110,12 +157,12 @@ public sealed class OidcFlowSkeletonTests
         IOptionsMonitor<RefreshTokenHashingOptions> hashing = new FakeOptionsMonitor<RefreshTokenHashingOptions>(new RefreshTokenHashingOptions { Pepper = "unit-test-pepper" });
         var keys = new Birdsoft.Security.Authentication.Jwt.DefaultJwtKeyProvider(monitor);
         var sessions = new Birdsoft.Security.Authentication.InMemorySessionStore();
-        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, env, safety, hostEnvironment, hashing, keys, sessions);
+        var authz = new Birdsoft.Security.Authentication.InMemoryAuthorizationDataStore();
+        var tokenService = new Birdsoft.Security.Authentication.InMemoryTokenService(monitor, env, safety, hostEnvironment, hashing, keys, sessions, authz: authz);
         var authState = new Birdsoft.Security.Authentication.InMemoryAuthStateService();
         var oidc = new Birdsoft.Security.Authentication.InMemoryOidcProviderService();
         var external = new Birdsoft.Security.Authentication.InMemoryExternalIdentityStore();
         var provisioner = new Birdsoft.Security.Authentication.InMemoryUserProvisioner();
-        var authz = new Birdsoft.Security.Authentication.InMemoryAuthorizationDataStore();
         return (tokenService, authState, oidc, external, provisioner, authz);
     }
 

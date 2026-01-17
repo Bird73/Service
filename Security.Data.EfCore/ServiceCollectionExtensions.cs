@@ -16,6 +16,9 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddSecurityEfCoreDataAccess(this IServiceCollection services)
     {
+        // Ensure schema exists for hosts/tests that don't eagerly create the database.
+        services.AddHostedService<EnsureSecurityDbCreatedHostedService>();
+
         services.AddScoped<ITenantRepository, EfTenantRepository>();
         services.AddScoped<ISubjectRepository, EfSubjectRepository>();
         services.AddScoped<IAuthStateRepository, EfAuthStateRepository>();
@@ -41,6 +44,17 @@ public static class ServiceCollectionExtensions
         // Entitlements (Products / TenantProducts)
         services.AddScoped<IPermissionCatalogStore, EfPermissionCatalogStore>();
         services.AddScoped<ITenantEntitlementStore, EfTenantEntitlementStore>();
+
+        // Platform token governance (global version / revocation)
+        services.AddScoped<IPlatformTokenVersionStore, EfPlatformTokenVersionStore>();
+
+        // Platform admin governance (role assignment + enable/disable)
+        services.AddScoped<IPlatformAdminStore, EfPlatformAdminStore>();
+
+        // Commercial governance stores
+        services.AddSingleton<IKeyMaterialChangeSignal, KeyMaterialChangeSignal>();
+        services.AddScoped<IJwtSigningKeyStore, EfJwtSigningKeyStore>();
+        services.AddScoped<IBootstrapKeyStore, EfBootstrapKeyStore>();
 
         return services;
     }

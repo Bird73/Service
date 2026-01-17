@@ -2,11 +2,14 @@ namespace Birdsoft.Security.Authentication.Persistence;
 
 using Birdsoft.Security.Abstractions;
 using Birdsoft.Security.Abstractions.Constants;
+using Birdsoft.Security.Abstractions.Models;
 using Birdsoft.Security.Abstractions.Options;
 using Birdsoft.Security.Abstractions.Repositories;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Abstractions.Stores;
 using Birdsoft.Security.Authentication.Jwt;
+using Birdsoft.Security.Data.EfCore;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
@@ -26,6 +29,10 @@ public sealed class RepositoryTokenService : ITokenService
     private readonly IRefreshTokenRepository _refresh;
     private readonly IAccessTokenDenylistStore _denylist;
     private readonly ISessionStore _sessions;
+    private readonly IJwtSigningKeyStore? _signingKeys;
+    private readonly IAuthorizationDataStore? _authz;
+    private readonly IPermissionCatalogStore? _permissionCatalog;
+    private readonly SecurityDbContext? _db;
     private readonly TimeProvider _time;
 
     public RepositoryTokenService(
@@ -40,7 +47,11 @@ public sealed class RepositoryTokenService : ITokenService
         IRefreshTokenRepository refresh,
         IAccessTokenDenylistStore denylist,
         ISessionStore sessions,
-        TimeProvider? timeProvider = null)
+        SecurityDbContext? db = null,
+        IJwtSigningKeyStore? signingKeys = null,
+        TimeProvider? timeProvider = null,
+        IAuthorizationDataStore? authz = null,
+        IPermissionCatalogStore? permissionCatalog = null)
     {
         _jwtOptions = jwtOptions;
         _envOptions = envOptions;
@@ -53,7 +64,11 @@ public sealed class RepositoryTokenService : ITokenService
         _refresh = refresh;
         _denylist = denylist;
         _sessions = sessions;
+        _signingKeys = signingKeys;
+        _db = db;
         _time = timeProvider ?? TimeProvider.System;
+        _authz = authz;
+        _permissionCatalog = permissionCatalog;
     }
 
     public async Task<AccessTokenValidationResult> ValidateAccessTokenAsync(string accessToken, CancellationToken cancellationToken = default)
@@ -110,6 +125,12 @@ public sealed class RepositoryTokenService : ITokenService
         if (exp + skew < now)
         {
             return AccessTokenValidationResult.Fail(AuthErrorCodes.TokenExpired);
+        }
+
+        if (!TryGetString(root, SecurityClaimTypes.TokenType, out var tokenType)
+            || !string.Equals(tokenType, "access", StringComparison.OrdinalIgnoreCase))
+        {
+            return AccessTokenValidationResult.Fail("invalid_token_type");
         }
 
         if (!TryGetString(root, SecurityClaimTypes.TenantId, out var tenantIdRaw) || !Guid.TryParse(tenantIdRaw, out var tenantId))
@@ -224,6 +245,24 @@ public sealed class RepositoryTokenService : ITokenService
     {
         var opts = _jwtOptions.CurrentValue;
 
+        var effectiveRoles = roles;
+        var effectiveScopes = scopes;
+        IReadOnlyList<string>? effectivePermissions = null;
+        if (_authz is not null)
+        {
+            if (effectiveRoles is null)
+            {
+                effectiveRoles = await _authz.GetRolesAsync(tenantId, ourSubject, cancellationToken);
+            }
+
+            if (effectiveScopes is null)
+            {
+                effectiveScopes = await _authz.GetScopesAsync(tenantId, ourSubject, cancellationToken);
+            }
+
+            effectivePermissions = await _authz.GetPermissionsAsync(tenantId, ourSubject, cancellationToken);
+        }
+
         var tenant = await _tenants.FindAsync(tenantId, cancellationToken)
             ?? await _tenants.CreateAsync(tenantId, $"tenant-{tenantId:N}", cancellationToken);
 
@@ -234,7 +273,7 @@ public sealed class RepositoryTokenService : ITokenService
         // Initial issuance creates the first refresh session and uses it as the JWT session_id.
         var sessionId = Guid.NewGuid();
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, tenant.TokenVersion, subject.TokenVersion, roles, scopes);
+        var accessToken = CreateAccessToken(opts, tenantId, ourSubject, jti, sessionId, tenant.TokenVersion, subject.TokenVersion, effectiveRoles, effectiveScopes, effectivePermissions);
 
         var refreshToken = CreateRefreshToken(tenantId);
         var refreshExpires = _time.GetUtcNow().AddDays(Math.Max(1, opts.RefreshTokenDays));
@@ -339,6 +378,25 @@ public sealed class RepositoryTokenService : ITokenService
             return RefreshResult.Fail("invalid_token_version");
         }
 
+        // V19-1 governance: deny refresh when the subject currently has any permission that is bound
+        // to a missing/disabled product (product disable should take effect immediately for refresh).
+        IReadOnlyList<string>? roles = null;
+        IReadOnlyList<string>? scopes = null;
+        IReadOnlyList<string>? permissions = null;
+        if (_authz is not null)
+        {
+            roles = await _authz.GetRolesAsync(dto.TenantId, dto.OurSubject, cancellationToken);
+            scopes = await _authz.GetScopesAsync(dto.TenantId, dto.OurSubject, cancellationToken);
+            permissions = await _authz.GetPermissionsAsync(dto.TenantId, dto.OurSubject, cancellationToken);
+        }
+
+        var permCheck = await ValidatePermissionProductsAsync(permissions, cancellationToken);
+        if (!permCheck.ok)
+        {
+            _ = await _refresh.RevokeAsync(dto.TenantId, dto.OurSubject, dto.SessionId, dto.TokenLookup, dto.TokenHash, now, revokeReason: permCheck.revokeReason, cancellationToken: cancellationToken);
+            return RefreshResult.Fail(permCheck.errorCode);
+        }
+
         // rotation (atomic): create new refresh and revoke old with replacedBy in the same transaction
         var opts = _jwtOptions.CurrentValue;
         var newRefreshToken = CreateRefreshToken(dto.TenantId);
@@ -368,7 +426,7 @@ public sealed class RepositoryTokenService : ITokenService
         }
 
         var jti = Guid.NewGuid().ToString("N");
-        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, newSessionId, currentTenantTv, currentSubjectTv, roles: null, scopes: null);
+        var accessToken = CreateAccessToken(opts, dto.TenantId, dto.OurSubject, jti, newSessionId, currentTenantTv, currentSubjectTv, roles, scopes, permissions);
 
         return RefreshResult.Success(new TokenPair
         {
@@ -459,7 +517,62 @@ public sealed class RepositoryTokenService : ITokenService
                or "subject_inactive"
                or "token_version_mismatch"
                or "invalid_tenant"
-               or "invalid_subject";
+               or "invalid_subject"
+               or "product_not_enabled"
+               or "permission_unknown";
+
+    private async ValueTask<(bool ok, string errorCode, string revokeReason)> ValidatePermissionProductsAsync(
+        IReadOnlyList<string>? permissions,
+        CancellationToken cancellationToken)
+    {
+        if (permissions is null || permissions.Count == 0)
+        {
+            return (true, string.Empty, string.Empty);
+        }
+
+        if (_db is null || _permissionCatalog is null)
+        {
+            return (true, string.Empty, string.Empty);
+        }
+
+        var productKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var perm in permissions)
+        {
+            if (string.IsNullOrWhiteSpace(perm))
+            {
+                continue;
+            }
+
+            var entry = await _permissionCatalog.TryGetPermissionAsync(perm.Trim(), cancellationToken);
+            if (entry is null)
+            {
+                return (false, "permission_unknown", "permission_unknown");
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.ProductKey))
+            {
+                productKeys.Add(entry.ProductKey.Trim());
+            }
+        }
+
+        if (productKeys.Count == 0)
+        {
+            return (true, string.Empty, string.Empty);
+        }
+
+        var enabledProducts = await _db.Products.AsNoTracking()
+            .Where(p => productKeys.Contains(p.ProductKey) && p.Status == (int)ProductStatus.Enabled)
+            .Select(p => p.ProductKey)
+            .ToListAsync(cancellationToken);
+
+        // Any missing or disabled product => deny.
+        if (enabledProducts.Count != productKeys.Count)
+        {
+            return (false, AuthErrorCodes.ProductNotEnabled, "product_not_enabled");
+        }
+
+        return (true, string.Empty, string.Empty);
+    }
 
     private string CreateAccessToken(
         JwtOptions opts,
@@ -470,7 +583,8 @@ public sealed class RepositoryTokenService : ITokenService
         int tenantTokenVersion,
         int subjectTokenVersion,
         IReadOnlyList<string>? roles,
-        IReadOnlyList<string>? scopes)
+        IReadOnlyList<string>? scopes,
+        IReadOnlyList<string>? permissions)
     {
         var now = _time.GetUtcNow();
         var exp = now.AddMinutes(Math.Max(1, opts.AccessTokenMinutes));
@@ -503,6 +617,8 @@ public sealed class RepositoryTokenService : ITokenService
             ["sub"] = ourSubject.ToString(),
             [SecurityClaimTypes.TenantId] = tenantId.ToString(),
             [SecurityClaimTypes.OurSubject] = ourSubject.ToString(),
+            [SecurityClaimTypes.TokenType] = "access",
+            [SecurityClaimTypes.TokenPlane] = "tenant",
             [SecurityClaimTypes.TenantTokenVersion] = tenantTokenVersion,
             [SecurityClaimTypes.SubjectTokenVersion] = subjectTokenVersion,
         };
@@ -523,6 +639,11 @@ public sealed class RepositoryTokenService : ITokenService
             payload[SecurityClaimTypes.Scope] = string.Join(' ', scopes);
         }
 
+        if (permissions is { Count: > 0 })
+        {
+            payload[SecurityClaimTypes.Permissions] = permissions;
+        }
+
         var headerJson = JsonSerializer.Serialize(header, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
         var payloadJson = JsonSerializer.Serialize(payload, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
 
@@ -538,6 +659,37 @@ public sealed class RepositoryTokenService : ITokenService
 
     private SigningKey ResolveSigningKey(JwtOptions opts)
     {
+        // Commercial governance: DB-backed signing key ring.
+        if (_signingKeys is not null)
+        {
+            var active = _signingKeys.GetActiveSigningMaterialAsync().GetAwaiter().GetResult();
+            if (active is not null)
+            {
+                var alg = string.IsNullOrWhiteSpace(active.Algorithm) ? "RS256" : active.Algorithm.Trim();
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(active.PrivateKeyPem))
+                    {
+                        throw new InvalidOperationException("DB signing key requires PrivateKeyPem for RS256.");
+                    }
+
+                    return new SigningKey("RS256", active.Kid, TryLoadRsa(active.PrivateKeyPem), null);
+                }
+
+                if (alg.StartsWith("HS", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrWhiteSpace(active.SymmetricKey))
+                    {
+                        throw new InvalidOperationException("DB signing key requires SymmetricKey for HS*.");
+                    }
+
+                    return new SigningKey(alg.ToUpperInvariant(), active.Kid, null, Encoding.UTF8.GetBytes(active.SymmetricKey));
+                }
+
+                throw new InvalidOperationException($"Unsupported signing algorithm '{alg}'.");
+            }
+        }
+
         if (opts.KeyRing?.Keys is { Length: > 0 })
         {
             var ring = opts.KeyRing;
@@ -647,6 +799,41 @@ public sealed class RepositoryTokenService : ITokenService
 
     private IEnumerable<ValidationKey> ResolveValidationKeys(string tokenAlg, string tokenKid, JwtOptions opts)
     {
+        // Commercial governance: DB-backed signing key ring (Active + Inactive for verification).
+        if (_signingKeys is not null)
+        {
+            var mats = _signingKeys.GetVerificationKeysAsync().GetAwaiter().GetResult();
+            foreach (var m in mats)
+            {
+                if (!string.Equals(m.Kid, tokenKid, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var alg = string.IsNullOrWhiteSpace(m.Algorithm) ? "RS256" : m.Algorithm.Trim();
+                if (!string.Equals(alg, tokenAlg, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (alg.Equals("RS256", StringComparison.OrdinalIgnoreCase))
+                {
+                    var rsa = TryLoadRsa(m.PublicKeyPem);
+                    if (rsa is not null)
+                    {
+                        yield return new ValidationKey(m.Kid, rsa, null);
+                    }
+
+                    continue;
+                }
+
+                if (alg.StartsWith("HS", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(m.SymmetricKey))
+                {
+                    yield return new ValidationKey(m.Kid, null, Encoding.UTF8.GetBytes(m.SymmetricKey));
+                }
+            }
+        }
+
         if (opts.KeyRing?.Keys is { Length: > 0 })
         {
             foreach (var k in opts.KeyRing.Keys)

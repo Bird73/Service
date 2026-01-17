@@ -3,18 +3,154 @@ namespace Birdsoft.Security.Authentication.Tests.Integration;
 using Birdsoft.Security.Abstractions;
 using Birdsoft.Security.Abstractions.Contracts.Auth;
 using Birdsoft.Security.Abstractions.Contracts.Common;
+using Birdsoft.Security.Abstractions.Constants;
 using Birdsoft.Security.Abstractions.Services;
 using Birdsoft.Security.Data.EfCore;
+using Birdsoft.Security.Data.EfCore.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.IdentityModel.Tokens;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using TenantStatus = Birdsoft.Security.Abstractions.Models.TenantStatus;
+using UserStatus = Birdsoft.Security.Abstractions.Models.UserStatus;
 
 public sealed class TokenRefreshContractTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private static JsonDocument ParseJwtPayload(string jwt)
+    {
+        var parts = jwt.Split('.');
+        if (parts.Length != 3)
+        {
+            throw new InvalidOperationException("Invalid JWT format.");
+        }
+
+        var payloadJson = Encoding.UTF8.GetString(Base64UrlEncoder.DecodeBytes(parts[1]));
+        return JsonDocument.Parse(payloadJson);
+    }
+
+    private static IReadOnlyList<string> GetStringArrayClaim(JsonElement root, string claimName)
+    {
+        if (!root.TryGetProperty(claimName, out var p) || p.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+
+        return p.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!)
+            .ToArray();
+    }
+
+    private static async Task SeedEfAuthorizationAsync(AuthenticationApiFactory factory, Guid tenantId, Guid ourSubject)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<SecurityDbContext>();
+        await db.Database.EnsureCreatedAsync();
+
+        var now = DateTimeOffset.UtcNow;
+
+        if (!await db.Tenants.AsNoTracking().AnyAsync(t => t.TenantId == tenantId))
+        {
+            db.Tenants.Add(new TenantEntity
+            {
+                TenantId = tenantId,
+                Name = $"tenant-{tenantId:N}",
+                Status = (int)TenantStatus.Active,
+                TokenVersion = 0,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+
+        if (!await db.Subjects.AsNoTracking().AnyAsync(s => s.TenantId == tenantId && s.OurSubject == ourSubject))
+        {
+            db.Subjects.Add(new SubjectEntity
+            {
+                TenantId = tenantId,
+                OurSubject = ourSubject,
+                Status = (int)UserStatus.Active,
+                TokenVersion = 0,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+
+        var roleId = Guid.NewGuid();
+        var permFromRoleId = Guid.NewGuid();
+        var permDirectId = Guid.NewGuid();
+
+        var roleName = "test_role";
+        var scopeKey = "test.scope.read";
+        var permFromRoleKey = "test:perm:from_role";
+        var permDirectKey = "test:perm:direct";
+
+        db.Roles.Add(new RoleEntity
+        {
+            TenantId = tenantId,
+            RoleId = roleId,
+            RoleName = roleName,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+
+        db.Permissions.AddRange(
+            new PermissionEntity
+            {
+                PermId = permFromRoleId,
+                PermKey = permFromRoleKey,
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new PermissionEntity
+            {
+                PermId = permDirectId,
+                PermKey = permDirectKey,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+
+        db.RolePermissions.Add(new RolePermissionEntity
+        {
+            TenantId = tenantId,
+            RoleId = roleId,
+            PermId = permFromRoleId,
+            AssignedAt = now,
+        });
+
+        db.SubjectRoles.Add(new SubjectRoleEntity
+        {
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            RoleId = roleId,
+            AssignedAt = now,
+        });
+
+        db.SubjectScopes.Add(new SubjectScopeEntity
+        {
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            ScopeKey = scopeKey,
+            AssignedAt = now,
+        });
+
+        db.SubjectPermissions.Add(new SubjectPermissionEntity
+        {
+            TenantId = tenantId,
+            OurSubject = ourSubject,
+            PermId = permDirectId,
+            AssignedAt = now,
+        });
+
+        await db.SaveChangesAsync();
+    }
 
     private static void TryDeleteFile(string path)
     {
@@ -148,6 +284,47 @@ public sealed class TokenRefreshContractTests
             Assert.NotNull(body2.Data);
             Assert.False(string.IsNullOrWhiteSpace(body2.Data!.RefreshToken));
             Assert.NotEqual(body1.Data.RefreshToken, body2.Data.RefreshToken);
+        });
+    }
+
+    [Fact]
+    public async Task Refresh_Preserves_Roles_Scopes_And_Permissions_In_AccessToken()
+    {
+        await WithTempDbAsync(async (factory, client) =>
+        {
+            var tenantId = Guid.NewGuid();
+            var ourSubject = Guid.NewGuid();
+
+            await SeedEfAuthorizationAsync(factory, tenantId, ourSubject);
+
+            var initial = await IssueInitialTokensAsync(factory, tenantId, ourSubject);
+
+            using var initialPayload = ParseJwtPayload(initial.AccessToken);
+            var initialRoles = GetStringArrayClaim(initialPayload.RootElement, SecurityClaimTypes.Roles).Order(StringComparer.Ordinal).ToArray();
+            var initialScopes = GetStringArrayClaim(initialPayload.RootElement, SecurityClaimTypes.Scopes).Order(StringComparer.Ordinal).ToArray();
+            var initialPerms = GetStringArrayClaim(initialPayload.RootElement, SecurityClaimTypes.Permissions).Order(StringComparer.Ordinal).ToArray();
+
+            Assert.Contains("test_role", initialRoles);
+            Assert.Contains("test.scope.read", initialScopes);
+            Assert.Contains("test:perm:from_role", initialPerms);
+            Assert.Contains("test:perm:direct", initialPerms);
+
+            var refreshRes = await PostRefreshAsync(client, tenantId, initial.RefreshToken);
+            Assert.Equal(HttpStatusCode.OK, refreshRes.StatusCode);
+
+            var refreshBody = await refreshRes.Content.ReadFromJsonAsync<ApiResponse<TokenPair>>(JsonOptions);
+            Assert.NotNull(refreshBody);
+            Assert.True(refreshBody!.Success);
+            Assert.NotNull(refreshBody.Data);
+
+            using var refreshedPayload = ParseJwtPayload(refreshBody.Data!.AccessToken);
+            var refreshedRoles = GetStringArrayClaim(refreshedPayload.RootElement, SecurityClaimTypes.Roles).Order(StringComparer.Ordinal).ToArray();
+            var refreshedScopes = GetStringArrayClaim(refreshedPayload.RootElement, SecurityClaimTypes.Scopes).Order(StringComparer.Ordinal).ToArray();
+            var refreshedPerms = GetStringArrayClaim(refreshedPayload.RootElement, SecurityClaimTypes.Permissions).Order(StringComparer.Ordinal).ToArray();
+
+            Assert.Equal(initialRoles, refreshedRoles);
+            Assert.Equal(initialScopes, refreshedScopes);
+            Assert.Equal(initialPerms, refreshedPerms);
         });
     }
 

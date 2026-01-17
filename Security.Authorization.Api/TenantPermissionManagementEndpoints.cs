@@ -201,11 +201,13 @@ internal static class TenantPermissionManagementEndpoints
         var clock = now ?? DateTimeOffset.UtcNow;
         var permissionKey = request.PermissionKey.Trim();
 
-        var productKey = await catalog.GetProductKeyForPermissionAsync(permissionKey, ct);
-        if (string.IsNullOrWhiteSpace(productKey))
+        var entry = await catalog.TryGetPermissionAsync(permissionKey, ct);
+        if (entry is null || string.IsNullOrWhiteSpace(entry.ProductKey))
         {
             return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "permission not found"), statusCode: StatusCodes.Status404NotFound);
         }
+
+        var productKey = entry.ProductKey;
 
         var enabled = await entitlements.IsProductEnabledAsync(tenantId.Value, productKey, clock, ct);
         if (!enabled)
@@ -265,11 +267,13 @@ internal static class TenantPermissionManagementEndpoints
         var clock = now ?? DateTimeOffset.UtcNow;
         var normalizedPermissionKey = permissionKey.Trim();
 
-        var productKey = await catalog.GetProductKeyForPermissionAsync(normalizedPermissionKey, ct);
-        if (string.IsNullOrWhiteSpace(productKey))
+        var entry = await catalog.TryGetPermissionAsync(normalizedPermissionKey, ct);
+        if (entry is null || string.IsNullOrWhiteSpace(entry.ProductKey))
         {
             return TypedResults.Json(ApiResponse<object>.Fail(AuthErrorCodes.NotFound, "permission not found"), statusCode: StatusCodes.Status404NotFound);
         }
+
+        var productKey = entry.ProductKey;
 
         var enabled = await entitlements.IsProductEnabledAsync(tenantId.Value, productKey, clock, ct);
         if (!enabled)

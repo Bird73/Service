@@ -1,10 +1,16 @@
 namespace Birdsoft.Security.Abstractions.Stores;
 
+public sealed record PermissionCatalogEntry(
+    string PermissionKey,
+    string? ProductKey);
+
 public interface IPermissionCatalogStore
 {
     /// <summary>
-    /// Returns the ProductKey associated with a permission key (e.g. "orders:read").
-    /// Return null when the permission is unknown or not associated with a product.
+    /// Returns a catalog entry for the permission key (e.g. "orders:read").
+    ///
+    /// - Return null when the permission is unknown.
+    /// - Return entry with ProductKey=null when the permission is known and public (not associated with a product).
     /// </summary>
-    ValueTask<string?> GetProductKeyForPermissionAsync(string permissionKey, CancellationToken cancellationToken = default);
+    ValueTask<PermissionCatalogEntry?> TryGetPermissionAsync(string permissionKey, CancellationToken cancellationToken = default);
 }

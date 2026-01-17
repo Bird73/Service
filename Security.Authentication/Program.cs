@@ -69,6 +69,9 @@ builder.Services.AddOptions<SecurityEnvironmentOptions>()
 builder.Services.AddOptions<SecuritySafetyOptions>()
     .Bind(builder.Configuration.GetSection(SecuritySafetyOptions.SectionName));
 
+builder.Services.AddOptions<BootstrapKeyHashingOptions>()
+    .Bind(builder.Configuration.GetSection(BootstrapKeyHashingOptions.SectionName));
+
 builder.Services.AddOptions<OidcProviderRegistryOptions>()
     .Bind(builder.Configuration.GetSection(OidcProviderRegistryOptions.SectionName));
 
@@ -94,10 +97,15 @@ builder.Services.AddOptions<MfaOptions>()
 builder.Services.AddOptions<AuditReliabilityOptions>()
     .Bind(builder.Configuration.GetSection(AuditReliabilityOptions.SectionName));
 
+// Governance rules shared with Authorization service (e.g., RequiredProductPrefixes).
+builder.Services.Configure<Birdsoft.Security.Abstractions.Options.SecurityAuthorizationOptions>(
+    builder.Configuration.GetSection(Birdsoft.Security.Abstractions.Options.SecurityAuthorizationOptions.SectionName));
+
 builder.Services.AddSingleton<IRateLimiterGate, TenantIpRateLimiterGate>();
 builder.Services.AddSingleton<IBruteForceProtection, InMemoryBruteForceProtection>();
 
-builder.Services.AddSingleton<IJwtKeyProvider, DefaultJwtKeyProvider>();
+builder.Services.AddSingleton<DefaultJwtKeyProvider>();
+builder.Services.AddSingleton<IJwtKeyProvider, DbBackedJwtKeyProvider>();
 builder.Services.AddSingleton<IJwksProvider>(sp => sp.GetRequiredService<IJwtKeyProvider>());
 
 builder.Services.AddTransient<CorrelationIdMiddleware>();
@@ -167,6 +175,9 @@ builder.Services.AddTransient<TenantResolutionMiddleware>();
 var dbConn = builder.Configuration.GetConnectionString("SecurityDb");
 var useEf = !string.IsNullOrWhiteSpace(dbConn);
 
+// Governance: validate permission->product relationships at startup (no-op if EF/DB not wired).
+builder.Services.AddHostedService<Birdsoft.Security.Data.EfCore.Services.PermissionProductIntegrityHostedService>();
+
 if (useEf)
 {
     builder.Services.AddDbContext<SecurityDbContext>(o => o.UseSqlite(dbConn));
@@ -212,11 +223,28 @@ else
 }
 
 // In-memory skeleton services (可替換為實際實作)
-builder.Services.AddSingleton<IUserProvisioner, InMemoryUserProvisioner>();
-builder.Services.AddSingleton<InMemoryAuthorizationDataStore>();
-builder.Services.AddSingleton<IAuthorizationDataStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
-builder.Services.AddSingleton<IAuthorizationAdminStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
-builder.Services.AddSingleton<IPasswordAuthenticator, InMemoryPasswordAuthenticator>();
+if (useEf)
+{
+    builder.Services.AddScoped<IUserProvisioner, Birdsoft.Security.Authentication.Persistence.RepositoryUserProvisioner>();
+}
+else
+{
+    builder.Services.AddSingleton<IUserProvisioner, InMemoryUserProvisioner>();
+}
+if (!useEf)
+{
+    builder.Services.AddSingleton<InMemoryAuthorizationDataStore>();
+    builder.Services.AddSingleton<IAuthorizationDataStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
+    builder.Services.AddSingleton<IAuthorizationAdminStore>(sp => sp.GetRequiredService<InMemoryAuthorizationDataStore>());
+}
+if (useEf)
+{
+    builder.Services.AddScoped<IPasswordAuthenticator, Birdsoft.Security.Authentication.Persistence.RepositoryPasswordAuthenticator>();
+}
+else
+{
+    builder.Services.AddSingleton<IPasswordAuthenticator, InMemoryPasswordAuthenticator>();
+}
 
 var app = builder.Build();
 

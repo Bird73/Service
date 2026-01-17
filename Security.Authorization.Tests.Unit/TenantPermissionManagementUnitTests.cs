@@ -24,11 +24,17 @@ public sealed class TenantPermissionManagementUnitTests
     {
         private readonly string? _productKey;
         public FakeCatalogStore(string? productKey) => _productKey = productKey;
-        public ValueTask<string?> GetProductKeyForPermissionAsync(string permissionKey, CancellationToken cancellationToken = default)
+        public ValueTask<PermissionCatalogEntry?> TryGetPermissionAsync(string permissionKey, CancellationToken cancellationToken = default)
         {
             _ = permissionKey;
             _ = cancellationToken;
-            return ValueTask.FromResult(_productKey);
+
+            if (_productKey is null)
+            {
+                return ValueTask.FromResult<PermissionCatalogEntry?>(null);
+            }
+
+            return ValueTask.FromResult<PermissionCatalogEntry?>(new PermissionCatalogEntry("test:perm", _productKey));
         }
     }
 
